@@ -1,0 +1,32 @@
+# Build context excludes — keeps the image small and the build fast.
+.git/
+.gitignore
+.github/
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+.env
+.env.*
+!.env.example
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+*.pid
+
+# Docs + reference not needed at runtime — kept out of the image.
+docs/
+n8n-reference/
+plan/
+*.md
+!README.md

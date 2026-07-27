@@ -1,0 +1,71 @@
+[project]
+name = "leetcode-coach"
+version = "0.1.0"
+description = "Python port of the LeetCode Coach n8n workflow — single-user daily LeetCode coaching service."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [{ name = "Vlad" }]
+
+# Runtime deps — pinned to versions published >=7 days ago (repo policy).
+# No floating latest/* ; ranges are bounded.
+dependencies = [
+    "fastapi>=0.115.0,<0.116",
+    "uvicorn[standard]>=0.32.0,<0.33",
+    "apscheduler>=3.10.4,<3.11",
+    "python-telegram-bot>=21.6,<22",
+    "openai>=1.50.0,<2",
+    "google-genai>=0.5.0,<1",
+    "google-api-python-client>=2.140.0,<3",
+    "google-auth>=2.35.0,<3",
+    "google-auth-oauthlib>=1.2.1,<2",
+    "httpx>=0.27.0,<0.28",
+    "tenacity>=9.0.0,<10",
+    "sqlmodel>=0.0.22,<0.1",
+    "alembic>=1.13.0,<2",
+    "psycopg[binary]>=3.2.0,<4",
+    "pydantic-settings>=2.5.0,<3",
+    "structlog>=24.4.0,<25",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.0,<9",
+    "pytest-asyncio>=0.24.0,<0.25",
+    "respx>=0.21.1,<0.22",
+    "testcontainers[postgres]>=4.8.0,<5",
+    "ruff>=0.7.0,<0.8",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/leetcode_coach"]
+
+[tool.ruff]
+src = ["src", "tests"]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+    "E", "F", "W",   # pycodestyle / pyflakes
+    "I",             # isort
+    "UP",            # pyupgrade
+    "B",             # bugbear
+    "SIM",           # simplify
+    "RUF",           # ruff-specific
+]
+ignore = ["E501"]  # line length handled by formatter
+
+[tool.ruff.lint.isort]
+known-first-party = ["leetcode_coach"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

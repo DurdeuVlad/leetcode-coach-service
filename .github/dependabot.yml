@@ -1,0 +1,30 @@
+version: 2
+updates:
+  # Python deps — weekly check for new versions of pinned packages.
+  # The repo policy is ">=7 days since publish" (see AGENTS.md /
+  # pyproject.toml comment), so weekly cadence + manual review is the right
+  # gate — Dependabot opens the PR, the maintainer merges once the version
+  # is >=7 days old and CI is green.
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    labels:
+      - "deps"
+      - "chore"
+    commit-message:
+      prefix: "chore(deps)"
+
+  # GitHub Actions — keep action versions fresh (setup-uv, checkout, etc).
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    labels:
+      - "deps"
+      - "ci"
+    commit-message:
+      prefix: "chore(ci)"

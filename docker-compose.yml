@@ -1,0 +1,49 @@
+# Local development: app + postgres.
+# Architecture §10: `docker compose up -d postgres`, then alembic, then uvicorn.
+# For local dev you usually run uvicorn on the host with --reload; the `app`
+# service here is for a full container-based smoke test (and mirrors Coolify).
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: leetcode
+      POSTGRES_PASSWORD: leetcode
+      POSTGRES_DB: leetcode_coach
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U leetcode -d leetcode_coach"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  app:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # Point at the compose-postgres service. Override via .env for real keys.
+      DATABASE_URL: postgresql+psycopg://leetcode:leetcode@postgres:5432/leetcode_coach
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-dummy}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-0}
+      TELEGRAM_WEBHOOK_URL: ${TELEGRAM_WEBHOOK_URL:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-dummy}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-dummy}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-dummy}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-dummy}
+      GOOGLE_REFRESH_TOKEN: ${GOOGLE_REFRESH_TOKEN:-dummy}
+      GOOGLE_TASKS_LIST_ID: ${GOOGLE_TASKS_LIST_ID:-dummy}
+      YOUTUBE_API_KEY: ${YOUTUBE_API_KEY:-}
+      LEETCODE_USERNAME: ${LEETCODE_USERNAME:-dummy}
+      TIMEZONE: ${TIMEZONE:-Europe/Bucharest}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+volumes:
+  pgdata:

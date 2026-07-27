@@ -15,8 +15,8 @@ from sqlalchemy import engine_from_config, pool
 
 # Import settings + SQLModel metadata + models (side effect: registers tables).
 from leetcode_coach.config import get_settings
-from leetcode_coach.db.base import SQLModel
 from leetcode_coach.db import models  # noqa: F401  (registers tables on metadata)
+from leetcode_coach.db.base import SQLModel
 
 config = context.config
 

@@ -24,12 +24,16 @@ class Settings(BaseSettings):
     )
 
     # Database
-    database_url: str = Field(..., description="Postgres DSN, e.g. postgresql+psycopg://user:pass@host:5432/db")
+    database_url: str = Field(
+        ..., description="Postgres DSN, e.g. postgresql+psycopg://user:pass@host:5432/db"
+    )
 
     # Telegram
     telegram_bot_token: str = Field(..., description="Bot token from @BotFather")
     telegram_chat_id: str = Field(..., description="Allowed chat id (single-user allowlist)")
-    telegram_webhook_url: str = Field("", description="Public HTTPS URL Telegram will POST updates to")
+    telegram_webhook_url: str = Field(
+        "", description="Public HTTPS URL Telegram will POST updates to"
+    )
 
     # LLM
     openai_api_key: str = Field(..., description="OpenAI API key (primary model)")

@@ -53,7 +53,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
     _configure_logging(settings.log_level)
     log = structlog.get_logger("lifespan")
-    log.info("startup", timezone=settings.timezone, webhook_url=settings.telegram_webhook_url or None)
+    log.info(
+        "startup", timezone=settings.timezone, webhook_url=settings.telegram_webhook_url or None
+    )
     # TODO(#017): start APScheduler here; set _scheduler.
     try:
         yield

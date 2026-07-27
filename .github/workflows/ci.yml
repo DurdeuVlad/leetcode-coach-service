@@ -43,6 +43,11 @@ jobs:
       GEMINI_API_KEY: test-key
       TELEGRAM_CHAT_ID: "123456"
       LEETCODE_USERNAME: test-user
+      # Google Tasks — required by Settings() at import time; test placeholders.
+      GOOGLE_CLIENT_ID: test-client-id
+      GOOGLE_CLIENT_SECRET: test-client-secret
+      GOOGLE_REFRESH_TOKEN: test-refresh-token
+      GOOGLE_TASKS_LIST_ID: test-task-list-id
       TIMEZONE: Europe/Bucharest
 
     steps:
@@ -61,10 +66,10 @@ jobs:
         run: uv sync --extra dev --frozen
 
       - name: Ruff check
-        run: uv run ruff check src tests
+        run: uv run ruff check .
 
       - name: Ruff format check
-        run: uv run ruff format --check src tests
+        run: uv run ruff format --check .
 
       - name: Run migrations against test DB
         run: uv run alembic upgrade head

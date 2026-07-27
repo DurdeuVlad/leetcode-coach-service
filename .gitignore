@@ -13,6 +13,8 @@ venv/
 env/
 
 # uv — lockfile IS committed for reproducible Coolify builds (strongest pin).
+# Override global ~/.gitignore_global (*.lock) which would otherwise exclude it.
+!uv.lock
 
 # Tests / coverage
 .pytest_cache/

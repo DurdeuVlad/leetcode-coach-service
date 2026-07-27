@@ -61,10 +61,29 @@ uv run pytest
 line length 100, target py312). `ruff format --check` verifies formatting
 without rewriting — run `uv run ruff format src tests` to fix.
 
+## Branch model
+
+This repo uses a two-branch model to keep untrusted code off the homelab:
+
+- **`dev`** — the integration branch. **All PRs target `dev`**, including
+  the maintainer's own. External contributors fork from `dev` and PR back
+  to `dev`. CI runs on every PR and every push to `dev`.
+- **`master`** — the release branch. **Only the maintainer merges
+  `dev` → `master`.** No direct pushes to `master` (branch protection
+  enforces this). A push to `master` is the deploy trigger — it auto-
+  deploys to the maintainer's homelab via `deploy.yml`.
+
+Why the split: the deployed container runs on the maintainer's homelab
+with real integration secrets (Telegram, OpenAI, Google refresh token).
+Auto-deploying every merged PR would let any external contributor's code
+run on the homelab with those secrets. The `dev`/`master` split makes the
+maintainer's merge-to-master the deliberate, reviewed deploy decision.
+See `plan/issues/033-cicd-coolify-tailscale.md` for the full rationale.
+
 ## Before you open a PR
 
-1. **Branch from `main`.** Name it `feat/<short>`, `fix/<short>`, or
-   `docs/<short>`.
+1. **Branch from `dev`.** Name it `feat/<short>`, `fix/<short>`, or
+   `docs/<short>`. PR back to `dev`, not `master`.
 2. **Lint and tests pass locally.** CI will run the same; don't push red.
 3. **One concern per PR.** A lint fix + a feature + a refactor in one PR
    makes review slow. Split them.

@@ -1,10 +1,16 @@
 name: CI
 
+# Branch model: `dev` is the integration branch (external PRs target it).
+# `master` is the release branch — only the maintainer merges dev -> master,
+# and only `master` deploys to the homelab. CI runs on:
+#   - any PR targeting dev (external contributors + maintainer's own PRs)
+#   - any push to dev (catch breakage before merge-to-master)
+#   - any push to master (runs before the deploy job in deploy.yml)
 on:
   push:
-    branches: [main]
+    branches: [master, dev]
   pull_request:
-    branches: [main]
+    branches: [dev]
 
 permissions:
   contents: read

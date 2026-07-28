@@ -15,11 +15,16 @@ Test cases:
   times_attempted preserved.
 - Existing row with solved=false → metadata refreshed, solved flips to
   true (the AC list confirms it), times_attempted preserved.
-- Cloudflare block → LeetCodeFetchError propagates (Browserless stub,
-  FR-4.2); no DB rows touched.
+- Browserless not configured → LeetCodeFetchError propagates (FR-4.2);
+  no DB rows touched.
+- Browserless 4xx → LeetCodeFetchError propagates; no DB rows touched.
 - Mock username → canned pool upserted.
 - Idempotent: a second refresh on the same canned pool is a no-op (rows
   already match).
+
+All GraphQL calls go through the homelab Browserless `/function` endpoint
+(per docs/business-requirements.md §8 #4). The direct leetcode.com/graphql/
+path is no longer exercised by the code.
 """
 
 from __future__ import annotations
@@ -35,7 +40,8 @@ from leetcode_coach.db import models as db_models
 from leetcode_coach.errors import LeetCodeFetchError
 from leetcode_coach.integrations import leetcode
 
-_GRAPHQL_URL = "https://leetcode.com/graphql/"
+_BROWSERLESS_URL = "https://browserless.example.com"
+_FUNCTION_URL = f"{_BROWSERLESS_URL}/function"
 
 
 def _recent_ac_response(slugs: list[tuple[str, str]]) -> dict:
@@ -82,18 +88,31 @@ def sqlite_session_factory(monkeypatch: pytest.MonkeyPatch):
     return engine
 
 
-def _set_username(monkeypatch: pytest.MonkeyPatch, username: str) -> None:
-    """Patch get_settings to return a config with the given leetcode_username."""
+def _set_username(
+    monkeypatch: pytest.MonkeyPatch,
+    username: str,
+    *,
+    browserless_url: str = _BROWSERLESS_URL,
+) -> None:
+    """Patch get_settings to return a config with the given leetcode_username.
+
+    `browserless_url` defaults to the test Browserless instance so the live
+    GraphQL path is exercised; pass `""` to test the not-configured branch.
+    """
     from leetcode_coach.config import Settings
 
     def _fake_get_settings():
         return Settings(
             telegram_bot_token="x",
             telegram_chat_id="123",
-            llm_api_key="x",
-            llm_model="m",
+            openai_api_key="x",
+            gemini_api_key="x",
+            google_client_id="x",
+            google_client_secret="x",
             google_refresh_token="x",
+            google_tasks_list_id="x",
             leetcode_username=username,
+            browserless_url=browserless_url,
             log_level="INFO",
             timezone="Europe/Bucharest",
         )
@@ -106,7 +125,7 @@ def _set_username(monkeypatch: pytest.MonkeyPatch, username: str) -> None:
 async def test_empty_db_inserts_all_as_solved(sqlite_session_factory, monkeypatch):
     """Empty DB → all fetched rows inserted with solved=true, times_attempted=1."""
     _set_username(monkeypatch, "realuser")
-    respx.post(_GRAPHQL_URL).mock(
+    respx.post(_FUNCTION_URL).mock(
         side_effect=[
             httpx.Response(200, json=_recent_ac_response([("two-sum", "Two Sum")])),
             httpx.Response(
@@ -154,7 +173,7 @@ async def test_existing_solved_row_metadata_refreshed_state_preserved(
         )
         session.commit()
 
-    respx.post(_GRAPHQL_URL).mock(
+    respx.post(_FUNCTION_URL).mock(
         side_effect=[
             httpx.Response(200, json=_recent_ac_response([("two-sum", "Two Sum")])),
             httpx.Response(
@@ -196,7 +215,7 @@ async def test_existing_unsolved_row_solved_flips_to_true(sqlite_session_factory
         )
         session.commit()
 
-    respx.post(_GRAPHQL_URL).mock(
+    respx.post(_FUNCTION_URL).mock(
         side_effect=[
             httpx.Response(200, json=_recent_ac_response([("two-sum", "Two Sum")])),
             httpx.Response(
@@ -214,15 +233,27 @@ async def test_existing_unsolved_row_solved_flips_to_true(sqlite_session_factory
 
 
 @pytest.mark.asyncio
+async def test_browserless_not_configured_propagates_no_db_write(
+    sqlite_session_factory, monkeypatch
+):
+    """BROWSERLESS_URL unset → LeetCodeFetchError propagates (FR-4.2);
+    no HTTP call attempted, no DB rows touched."""
+    _set_username(monkeypatch, "realuser", browserless_url="")
+    with pytest.raises(LeetCodeFetchError, match="BROWSERLESS_URL not configured"):
+        await leetcode.refresh_pool()
+
+    with Session(sqlite_session_factory) as session:
+        rows = session.exec(select(db_models.LeetCodeProblem)).all()
+    assert len(rows) == 0
+
+
+@pytest.mark.asyncio
 @respx.mock
-async def test_cloudflare_block_propagates_no_db_write(sqlite_session_factory, monkeypatch):
-    """Cloudflare block → LeetCodeFetchError propagates (Browserless stub,
-    FR-4.2); no DB rows touched."""
+async def test_browserless_4xx_propagates_no_db_write(sqlite_session_factory, monkeypatch):
+    """Browserless /function 4xx → LeetCodeFetchError propagates; no DB rows touched."""
     _set_username(monkeypatch, "realuser")
-    respx.post(_GRAPHQL_URL).mock(
-        return_value=httpx.Response(403, html="<html>Attention Required! | Cloudflare</html>")
-    )
-    with pytest.raises(LeetCodeFetchError):
+    respx.post(_FUNCTION_URL).mock(return_value=httpx.Response(400, text="bad code"))
+    with pytest.raises(LeetCodeFetchError, match="HTTP 400"):
         await leetcode.refresh_pool()
 
     with Session(sqlite_session_factory) as session:
@@ -262,7 +293,7 @@ async def test_idempotent_second_refresh_no_duplicate(sqlite_session_factory, mo
 async def test_multiple_problems_all_upserted(sqlite_session_factory, monkeypatch):
     """2 fetched problems → 2 rows upserted, both solved=true."""
     _set_username(monkeypatch, "realuser")
-    respx.post(_GRAPHQL_URL).mock(
+    respx.post(_FUNCTION_URL).mock(
         side_effect=[
             httpx.Response(
                 200,

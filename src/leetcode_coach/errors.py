@@ -58,16 +58,17 @@ class LeetCodeAPIError(LeetCodeCoachError):
 
 
 class LeetCodeFetchError(LeetCodeAPIError):
-    """LeetCode GraphQL fetch failed (block/rate-limit/malformed response).
+    """LeetCode GraphQL fetch failed (Browserless unavailable/error/malformed).
 
-    The Browserless fallback is a stub in v1 (architecture.md §12): on a
-    block we log the documented line and re-raise this — we never silently
-    succeed with fabricated data.
+    Raised when the homelab Browserless instance is not configured or
+    returns an error. Per architecture.md §12, Browserless is the sole
+    path for LeetCode GraphQL; we never silently succeed with fabricated
+    data.
     """
 
 
 class YouTubeDisabled(LeetCodeCoachError):
-    """YouTube search is unavailable — no API key, bad key, or quota exceeded.
+    """YouTube search is unavailable — SearXNG not configured or returned no results.
 
     Callers treat this as "skip enrichment", not a hard failure (#013).
     """

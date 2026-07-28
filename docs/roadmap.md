@@ -74,19 +74,19 @@ to Phase 1.
 
 **Goal:** the morning proposal actually fires and sends a Telegram message.
 
-- [ ] `prompts/propose.py` — system + user prompt, ported verbatim from
+- [x] `prompts/propose.py` — system + user prompt, ported verbatim from
       `n8n-reference/workflows/flow-a-schedule-and-expiry.json` AI Agent node
       `text` field.
-- [ ] `flows/flow_a.py` — `propose_5()`:
+- [x] `flows/flow_a.py` — `propose_5()`:
       1. Read recent log (30 rows), unsolved problems, active lessons.
       2. Call `LLMClient.complete(propose.prompt)`.
       3. Parse JSON response (`candidate_list_markdown` + `candidates`).
       4. Send the markdown to Telegram.
-- [ ] `scheduling/cron.py` — APScheduler job for `5 9 * * *` Europe/Bucharest.
-- [ ] **Fix the n8n bug:** the unsolved problem pool is read from
+- [x] `scheduling/cron.py` — APScheduler job for `5 9 * * *` Europe/Bucharest.
+- [x] **Fix the n8n bug:** the unsolved problem pool is read from
       `leetcode_problems WHERE solved = false` and passed into the prompt.
       The n8n version forgot this and only fetched `solved = true`.
-- [ ] Tests: `test_flow_a.py` with a mocked `LLMClient` returning a canned
+- [x] Tests: `test_flow_a.py` with a mocked `LLMClient` returning a canned
       5-candidate JSON. Asserts the Telegram send is called with the
       markdown, and that the unsolved pool is actually passed to the prompt
       (regression test for the n8n bug).
@@ -94,6 +94,10 @@ to Phase 1.
 **Exit criteria:** manually trigger `propose_5()` locally → Telegram receives
 a 5-candidate message with reasoning per candidate. The unsolved-pool
 regression test passes.
+✅ Met — 19/19 Flow A tests green (`test_flow_a.py`): BUG-1 regression
+(`_gather_data` reads `solved=false`, `_build_prompt` includes unsolved pool),
+parse/validate edge cases, full end-to-end flow with mocked LLM + Telegram.
+Full suite: 47/47 green.
 
 ## Phase 3 — Flow B (reply router + coach pass) (2 sessions)
 

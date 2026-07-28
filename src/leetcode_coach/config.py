@@ -42,11 +42,23 @@ class Settings(BaseSettings):
     openai_api_key: str = Field(..., description="OpenAI API key (primary model)")
     gemini_api_key: str = Field(..., description="Google Gemini API key (fallback model)")
 
-    # Google Tasks
-    google_client_id: str = Field(...)
-    google_client_secret: str = Field(...)
-    google_refresh_token: str = Field(...)
-    google_tasks_list_id: str = Field(..., description="Task list id to create/complete tasks in")
+    # Google Tasks — OPTIONAL per the 2026-07-28 decision to discontinue GCP
+    # OAuth for v1 (docs/business-requirements.md §8 #5). When all four are
+    # empty, google_tasks.py runs in mock mode: create_task returns synthetic
+    # IDs, mark_complete/update_task are no-ops. The flows still work; the
+    # coach feedback is delivered via Telegram reply instead of Google Task notes.
+    google_client_id: str = Field(
+        "", description="GCP OAuth client id — leave blank to disable Google Tasks"
+    )
+    google_client_secret: str = Field(
+        "", description="GCP OAuth client secret — leave blank to disable"
+    )
+    google_refresh_token: str = Field(
+        "", description="GCP OAuth refresh token — leave blank to disable"
+    )
+    google_tasks_list_id: str = Field(
+        "", description="Task list id — leave blank to disable Google Tasks"
+    )
 
     # YouTube search via SearXNG (homelab) — primary YouTube search path
     # (per docs/business-requirements.md §8 #3). If absent, YouTube

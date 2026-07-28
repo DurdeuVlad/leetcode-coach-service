@@ -193,13 +193,11 @@ the next morning.
 - [ ] Coolify: create Postgres service, note the connection string.
 - [ ] Coolify: create app service from the repo, set all env vars from
       `.env.example`, set `DATABASE_URL` to the Postgres service.
+      **Google Tasks vars left blank** (disabled per §8 #5).
 - [ ] First deploy: `alembic upgrade head` runs on startup.
 - [ ] Verify `/health` is 200 from the public URL.
 - [ ] Verify Telegram `setWebhook` succeeded (the app logs the response).
 - [ ] Send a test message to the bot from Telegram → app logs the update.
-- [ ] Flip GCP OAuth consent screen from `Testing` to `In production` (per
-      `n8n-reference/README.md` lines 325-353) and re-authenticate the
-      Google credential one final time.
 - [ ] Wait for 09:05 the next morning. Real proposal should arrive.
 
 **Exit criteria:** one full real day — morning proposal, user picks 2,
@@ -216,8 +214,12 @@ next day. All four tables have real rows. Cost log shows <$0.20 for the day.
 - [x] ~~If LeetCode GraphQL blocks the homelab IP → wire Browserless fallback.~~
       **Resolved 2026-07-28:** Browserless is now the primary (and only)
       path for LeetCode GraphQL (§8.4).
-- [ ] If Google Tasks causes more ops pain than value → consider dropping
-      it (open decision §8.5).
+- [x] ~~If Google Tasks causes more ops pain than value → consider dropping
+      it (open decision §8.5).~~ **Resolved 2026-07-28:** Google Tasks
+      disabled for v1 deploy — GCP OAuth discontinued to minimize external
+      API surfaces (§8.5). Coach feedback delivered via Telegram reply
+      instead of Google Task notes. Integration code retained for future
+      re-enablement.
 - [ ] Structured log → Loki → Grafana dashboard if observability needs grow.
 - [ ] Golden-output test suite for the coach pass: collect 10 real coach
       responses, manually rate them, lock them as regression baselines.

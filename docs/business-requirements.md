@@ -257,6 +257,12 @@ Four tables. Column names are case-sensitive and referenced by name in code.
    hypothetically. Running the same `fetch()` from within a real Chrome
    page context (Browserless `/function`) is the robust default. If
    Browserless is unavailable, fail loudly with `LeetCodeFetchError`.
-5. **Whether to keep the Google Tasks integration at all.** It's nice for
-   mobile visibility but doubles the auth surface. Could be dropped in v2
-   if it causes more ops pain than it's worth.
+5. **~~Whether to keep the Google Tasks integration at all.~~**
+   **Resolved 2026-07-28:** Google Tasks is **disabled for v1**. GCP OAuth
+   is discontinued to minimize external API surfaces and auth complexity.
+   All four `GOOGLE_*` env vars default to empty; `google_tasks.py` runs
+   in mock mode (synthetic task IDs, no-op mark_complete/update_task). The
+   flows still work end-to-end; coach feedback is delivered via the
+   Telegram reply instead of Google Task notes. The integration code is
+   retained for future re-enablement — set the four env vars and flip the
+   GCP consent screen to `In production` to restore it.

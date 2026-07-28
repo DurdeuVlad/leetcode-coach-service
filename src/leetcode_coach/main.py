@@ -23,6 +23,7 @@ from sqlalchemy import text
 
 from leetcode_coach.config import get_settings
 from leetcode_coach.db.base import engine
+from leetcode_coach.integrations.telegram import set_webhook
 from leetcode_coach.scheduling.cron import is_running, start_scheduler, stop_scheduler
 from leetcode_coach.webhooks.telegram import router as telegram_router
 
@@ -58,6 +59,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         "startup", timezone=settings.timezone, webhook_url=settings.telegram_webhook_url or None
     )
     start_scheduler()
+
+    # Register the Telegram webhook if a public URL is configured (#030).
+    # No-op in mock mode (dummy/empty token) — the app still boots for local dev.
+    if settings.telegram_webhook_url:
+        try:
+            await set_webhook(settings.telegram_webhook_url)
+            log.info("webhook_registered", url=settings.telegram_webhook_url)
+        except Exception as e:
+            log.error("webhook_registration_failed", error=str(e))
+    else:
+        log.info("webhook_skipped", reason="TELEGRAM_WEBHOOK_URL not set")
+
     try:
         yield
     finally:

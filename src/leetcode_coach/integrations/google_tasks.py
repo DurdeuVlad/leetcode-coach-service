@@ -10,6 +10,14 @@ Mock-aware: if `GOOGLE_CLIENT_ID` is the placeholder `mock` or empty, all
 calls log instead of hitting the API. The mock `create_task` returns a
 synthetic task id so Flow B can store it in `pending_review`.
 
+**Disabled by default for v1** (2026-07-28 decision —
+docs/business-requirements.md §8 #5): GCP OAuth is discontinued to minimize
+external API surfaces. All four Google env vars default to empty, which
+triggers mock mode. The flows still work end-to-end; coach feedback is
+delivered via the Telegram reply instead of Google Task notes. To re-enable,
+set the four GOOGLE_* env vars and flip the GCP consent screen to
+`In production`.
+
 The notes-append bug fix (AGENTS.md gotcha #2): `mark_complete` takes a
 `notes_append` argument and APPENDS to the existing notes, never replaces.
 The n8n version dropped the coach feedback; the Python port must not.

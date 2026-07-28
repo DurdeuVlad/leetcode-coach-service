@@ -229,10 +229,10 @@ TELEGRAM_CHAT_ID=              # the allowlist (single chat)
 TELEGRAM_WEBHOOK_URL=          # public URL Telegram will POST to
 OPENAI_API_KEY=
 GEMINI_API_KEY=
-GOOGLE_CLIENT_ID=
-GOOGLE_CLIENT_SECRET=
-GOOGLE_REFRESH_TOKEN=
-GOOGLE_TASKS_LIST_ID=
+GOOGLE_CLIENT_ID=               # OPTIONAL — blank = Google Tasks disabled (§8 #5)
+GOOGLE_CLIENT_SECRET=           # OPTIONAL — blank = disabled
+GOOGLE_REFRESH_TOKEN=           # OPTIONAL — blank = disabled
+GOOGLE_TASKS_LIST_ID=           # OPTIONAL — blank = disabled
 SEARXNG_URL=                   # homelab SearXNG JSON endpoint (YouTube search)
 BROWSERLESS_URL=               # homelab Browserless /function endpoint (LeetCode GraphQL)
 LEETCODE_USERNAME=

@@ -113,13 +113,11 @@ flowchart LR
     APP --> LLM["OpenAI<br/>primary"]
     APP --> LLMF["Gemini<br/>fallback"]
     APP --> GT["Google Tasks<br/>REST"]
-    APP --> LC["LeetCode<br/>GraphQL"]
-    APP --> YT["YouTube Data API<br/>optional"]
+    APP --> BL["Browserless<br/>(homelab)"] --> LC["LeetCode<br/>GraphQL"]
+    APP --> SX["SearXNG<br/>(homelab)"] --> YT["YouTube search"]
     APP --> TG_OUT["Telegram<br/>sendMessage"]
     ERR["global error handler"] --> TG_OUT
     APP -.raises.-> ERR
-    BL["Browserless<br/>(homelab)"] -. fallback .-> LC
-    SX["SearXNG<br/>(homelab)"] -. fallback .-> YT
 ```
 
 - **One container.** APScheduler runs in-process inside the FastAPI app — no
@@ -235,7 +233,8 @@ GOOGLE_CLIENT_ID=
 GOOGLE_CLIENT_SECRET=
 GOOGLE_REFRESH_TOKEN=
 GOOGLE_TASKS_LIST_ID=
-YOUTUBE_API_KEY=               # optional; if absent, YouTube search disabled
+SEARXNG_URL=                   # homelab SearXNG JSON endpoint (YouTube search)
+BROWSERLESS_URL=               # homelab Browserless /function endpoint (LeetCode GraphQL)
 LEETCODE_USERNAME=
 TIMEZONE=Europe/Bucharest
 LOG_LEVEL=INFO
@@ -295,10 +294,14 @@ a throwaway Postgres via `testcontainers-postgres` — no mocking the DB.
   SQLAlchemy `select()` calls. No `relationship=` cascades, no lazy loading
   surprises.
 - **No LLM tool-calling loop in v1.** The n8n version gave the agent a
-  YouTube search tool; in Python v1 we do the YouTube search (if enabled)
+  YouTube search tool; in Python v1 we do the YouTube search
   **before** the LLM call and pass results in the prompt. Tool-calling loops
   add complexity and failure modes that aren't justified for a 1-search/day
   use case. Revisit if the coach pass needs to call tools mid-generation.
-- **No Browserless / SearXNG in v1 unless a primary API actually fails.**
-  Per the user's decision: "only if needed and as a fallback." The
-  integration points are documented (§4) but the code paths are stubs.
+- **Browserless and SearXNG are primary integrations, not stubs.** Per the
+  2026-07-28 decision (see `docs/business-requirements.md` §8 #3 and #4):
+  SearXNG replaces the YouTube Data API entirely, and Browserless is the
+  sole path for LeetCode GraphQL. Cloudflare's 2026 bot detection makes
+  the direct httpx path non-viable, and dropping the YouTube API key
+  removes one Google OAuth surface. Both homelab services must be
+  configured via `SEARXNG_URL` and `BROWSERLESS_URL`; absence fails loudly.

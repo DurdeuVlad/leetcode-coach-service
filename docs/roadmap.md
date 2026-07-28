@@ -50,11 +50,13 @@ retries and typed errors. No flow logic yet.
       `mark_complete` (with `notes_append`, **not** replace — this fixes the
       n8n bug where notes were dropped on completion). Typed
       `GoogleAuthExpiredError` on `invalid_grant`.
-- [x] `integrations/leetcode.py` — `refresh_pool()` GraphQL pull. Stub the
-      Browserless fallback (log "GraphQL failed, Browserless not configured"
-      and re-raise for now).
-- [x] `integrations/youtube.py` — `search_walkthroughs(title)`. Optional;
-      raises `YouTubeDisabled` if `YOUTUBE_API_KEY` is unset.
+- [x] `integrations/leetcode.py` — `refresh_pool()` GraphQL pull via the
+      homelab Browserless `/function` endpoint (primary path per the
+      2026-07-28 decision — `docs/business-requirements.md` §8 #4).
+- [x] `integrations/youtube.py` — `search_walkthroughs(title)` via the
+      homelab SearXNG `engines=youtube` JSON API; raises `YouTubeDisabled`
+      if `SEARXNG_URL` is unset (per the 2026-07-28 decision —
+      `docs/business-requirements.md` §8 #3).
 - [x] `errors.py` — typed exception hierarchy + `send_alert(message)` that
       posts to Telegram.
 - [x] Tests for each client with `respx` mocks. Specifically:
@@ -208,8 +210,12 @@ next day. All four tables have real rows. Cost log shows <$0.20 for the day.
 
 - [ ] Calibrate the lesson graduation threshold (open decision §8.1 in
       `business-requirements.md`) after 2-3 weeks of real data.
-- [ ] If YouTube Data API quota becomes a problem → wire SearXNG fallback.
-- [ ] If LeetCode GraphQL blocks the homelab IP → wire Browserless fallback.
+- [x] ~~If YouTube Data API quota becomes a problem → wire SearXNG fallback.~~
+      **Resolved 2026-07-28:** SearXNG is now the primary YouTube backend;
+      YouTube Data API dropped entirely (§8.3).
+- [x] ~~If LeetCode GraphQL blocks the homelab IP → wire Browserless fallback.~~
+      **Resolved 2026-07-28:** Browserless is now the primary (and only)
+      path for LeetCode GraphQL (§8.4).
 - [ ] If Google Tasks causes more ops pain than value → consider dropping
       it (open decision §8.5).
 - [ ] Structured log → Loki → Grafana dashboard if observability needs grow.

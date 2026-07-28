@@ -27,9 +27,9 @@ the bot."
 | Telegram bot | bidirectional | primary UI: receives picks + code replies, sends proposals + feedback |
 | Google Tasks | outbound | mirrors each chosen problem as a task; updated on completion/expiry |
 | LLM provider (OpenAI primary, Gemini fallback) | outbound | candidate selection + coach pass |
-| LeetCode GraphQL | outbound (weekly) | refreshes the unsolved problem pool |
+| LeetCode GraphQL via Browserless (homelab) | outbound (weekly) | refreshes the unsolved problem pool; headless Chrome gets past Cloudflare |
+| YouTube search via SearXNG (homelab) | outbound (per coach pass) | finds tutorial videos for the coach prompt |
 | Homelab Postgres | internal | all persistent state |
-| (Optional) SearXNG / Browserless on homelab | outbound | fallback search/scraping, only if a primary API fails |
 
 ## 4. Functional requirements
 
@@ -125,9 +125,12 @@ the bot."
 
 - **FR-4.1** Once per week, pull the user's LeetCode problem history via the
   LeetCode GraphQL API and upsert into `leetcode_problems`.
-- **FR-4.2** If the GraphQL endpoint is rate-limited or Cloudflare-blocked,
-  fall back to a Browserless session on the homelab (only if available).
-  This is the only sanctioned use of Browserless in v1.
+- **FR-4.2** All LeetCode GraphQL calls go through the homelab Browserless
+  instance (headless Chrome). Cloudflare's 2026 bot detection blocks
+  unauthenticated programmatic GraphQL from datacenter/homelab IPs; running
+  the same `fetch()` from within a real Chrome page context is the primary
+  path, not a fallback. If Browserless is unavailable, raise
+  `LeetCodeFetchError` — do not attempt a direct httpx call.
 
 ### FR-5 — Adaptability loop (cross-flow)
 
@@ -240,10 +243,20 @@ Four tables. Column names are case-sensitive and referenced by name in code.
 2. **Lesson wording.** How terse vs. how descriptive? The coach prompt says
    "short, e.g. `check empty input before binary search`" — confirm this is
    the right shape after seeing 5-10 real lessons.
-3. **SearXNG as YouTube API replacement.** Defer until the YouTube Data API
-   quota actually becomes a problem (it likely won't at 1 search/day).
-4. **Browserless for LeetCode GraphQL.** Defer until the GraphQL endpoint
-   actually rate-limits or blocks the homelab IP.
+3. **~~SearXNG as YouTube API replacement.~~** **Resolved 2026-07-28: yes,
+   replace.** The YouTube Data API key is dropped entirely. SearXNG
+   (`engines=youtube` JSON API) is the sole YouTube search backend. Reason:
+   one fewer Google API key to manage, no quota concerns at 1 search/day,
+   leverages existing homelab infrastructure. The YouTube Data API code path
+   is deleted, not kept as a fallback.
+4. **~~Browserless for LeetCode GraphQL.~~** **Resolved 2026-07-28: yes,
+   primary path.** Browserless is the primary (and only) path for all
+   LeetCode GraphQL calls; the direct httpx code path is removed. Reason:
+   Cloudflare's 2026 bot detection blocks unauthenticated programmatic
+   GraphQL from datacenter/homelab IPs as a matter of course, not
+   hypothetically. Running the same `fetch()` from within a real Chrome
+   page context (Browserless `/function`) is the robust default. If
+   Browserless is unavailable, fail loudly with `LeetCodeFetchError`.
 5. **Whether to keep the Google Tasks integration at all.** It's nice for
    mobile visibility but doubles the auth surface. Could be dropped in v2
    if it causes more ops pain than it's worth.

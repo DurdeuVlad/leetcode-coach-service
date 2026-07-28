@@ -48,8 +48,19 @@ class Settings(BaseSettings):
     google_refresh_token: str = Field(...)
     google_tasks_list_id: str = Field(..., description="Task list id to create/complete tasks in")
 
-    # YouTube (optional)
-    youtube_api_key: str = Field("", description="If absent, YouTube search is disabled")
+    # YouTube search via SearXNG (homelab) — primary YouTube search path
+    # (per docs/business-requirements.md §8 #3). If absent, YouTube
+    # enrichment is disabled (callers skip, not hard error).
+    searxng_url: str = Field(
+        "", description="Base URL of SearXNG instance, e.g. https://search.example.com"
+    )
+
+    # Browserless (homelab) — primary path for LeetCode GraphQL (per
+    # docs/business-requirements.md §8 #4). If absent, GraphQL calls raise
+    # LeetCodeFetchError immediately.
+    browserless_url: str = Field(
+        "", description="Base URL of Browserless, e.g. https://browserless.example.com"
+    )
 
     # LeetCode
     leetcode_username: str = Field(...)

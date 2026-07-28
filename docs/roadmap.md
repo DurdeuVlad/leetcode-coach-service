@@ -158,13 +158,13 @@ inserted, Google Task marked complete with feedback in notes.
 **Goal:** the 05:05 sweep marks un-answered problems expired and sends the
 summary.
 
-- [ ] `flows/expiry.py` — `sweep_expired()`:
+- [x] `flows/expiry.py` — `sweep_expired()`:
       1. Select today's `pending_review` where `status = open`.
       2. For each: set `status = expired`, update Google Task notes with
          "Expired without reply on <date>" (don't delete).
       3. Send one Telegram summary message.
-- [ ] APScheduler job for `5 5 * * *`.
-- [ ] Tests: `test_expiry.py` with 0, 1, and 2 open rows.
+- [x] APScheduler job for `5 5 * * *`.
+- [x] Tests: `test_expiry.py` with 0, 1, and 2 open rows.
 
 **Exit criteria:** manually trigger `sweep_expired()` with 2 open rows in
 the DB → both marked expired, Google Tasks updated, one summary message

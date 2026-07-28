@@ -355,7 +355,7 @@ async def test_propose_5_end_to_end(sqlite_session_factory, monkeypatch):
         return_value=httpx.Response(200, json={"ok": True, "result": {"message_id": 42}})
     )
 
-    # Use chat_id "0" which matches the .env TELEGRAM_CHAT_ID=0 allowlist.
+    # chat_id "123456" is accepted by the telegram_test_settings fixture in conftest.py.
     markdown = await propose_5(llm=mock_llm, chat_id="123456")
     assert "Two Sum" in markdown
     assert mock_llm.complete.called

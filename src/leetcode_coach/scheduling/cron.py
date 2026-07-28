@@ -6,8 +6,8 @@ functions. No business logic here.
 Jobs registered:
 - `flow_a.propose_5()` at `5 9 * * *` Europe/Bucharest (FR-1.1).
 - `expiry.sweep_expired()` at `5 5 * * *` Europe/Bucharest (FR-3.1).
-  (#029 weekly refresh adds its job to the same scheduler in a later phase —
-  this module is the single registration point.)
+- `leetcode.refresh_pool()` at `0 3 * * 1` Europe/Bucharest (FR-4.1, weekly
+  Monday 03:00). This module is the single registration point.
 
 Escaped job errors are wrapped in the #008 error handler so a failure sends
 exactly one Telegram alert (NFR-1 layer 3), never a silent crash.
@@ -57,9 +57,23 @@ async def _safe_sweep_expired() -> None:
         await send_alert(f"Expiry sweep failed: {e}")
 
 
+async def _safe_refresh_pool() -> None:
+    """Wrap refresh_pool in the #008 error handler: on any escaped exception
+    (e.g. LeetCodeFetchError from a Cloudflare block — the Browserless
+    fallback is a stub in v1, FR-4.2), send exactly one Telegram alert.
+    """
+    from leetcode_coach.integrations.leetcode import refresh_pool
+
+    try:
+        await refresh_pool()
+    except Exception as e:
+        log.error("refresh_pool_job_failed", error=str(e), exc_info=True)
+        await send_alert(f"Weekly LeetCode refresh failed: {e}")
+
+
 def start_scheduler() -> AsyncIOScheduler:
-    """Build and start the in-process AsyncIO scheduler with the Flow A and
-    expiry jobs.
+    """Build and start the in-process AsyncIO scheduler with the Flow A,
+    expiry, and weekly refresh jobs.
 
     Idempotent: if already running, returns the existing scheduler. Called
     by the FastAPI lifespan on startup.
@@ -82,11 +96,17 @@ def start_scheduler() -> AsyncIOScheduler:
         id="expiry_sweep",
         replace_existing=True,
     )
+    _scheduler.add_job(
+        _safe_refresh_pool,
+        CronTrigger(day_of_week="mon", hour=3, minute=0, timezone=settings.timezone),
+        id="leetcode_refresh_pool",
+        replace_existing=True,
+    )
     _scheduler.start()
     log.info(
         "scheduler_started",
         timezone=settings.timezone,
-        jobs=["flow_a_propose_5", "expiry_sweep"],
+        jobs=["flow_a_propose_5", "expiry_sweep", "leetcode_refresh_pool"],
     )
     return _scheduler
 

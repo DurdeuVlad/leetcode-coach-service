@@ -174,10 +174,10 @@ sent.
 
 **Goal:** the problem pool stays current without manual intervention.
 
-- [ ] `integrations/leetcode.py` `refresh_pool()` — hit LeetCode GraphQL,
+- [x] `integrations/leetcode.py` `refresh_pool()` — hit LeetCode GraphQL,
       upsert into `leetcode_problems`.
-- [ ] APScheduler job for `0 3 * * 1` (Monday 03:00).
-- [ ] Tests: `test_leetcode_refresh.py` with a mocked GraphQL response.
+- [x] APScheduler job for `0 3 * * 1` (Monday 03:00).
+- [x] Tests: `test_leetcode_refresh.py` with a mocked GraphQL response.
 
 **Exit criteria:** manually trigger `refresh_pool()` → `leetcode_problems`
 has the test fixture's rows.

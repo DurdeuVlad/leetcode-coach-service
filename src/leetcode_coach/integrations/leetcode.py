@@ -2,8 +2,8 @@
 
 Per issue #012: this module *fetches and parses* the user's recent accepted
 submissions + enriches them with problem metadata (difficulty, tags) via
-LeetCode's undocumented GraphQL endpoint. The DB upsert (`refresh_pool`)
-lands in #029 — this module exposes `fetch_problems()` for that to consume.
+LeetCode's undocumented GraphQL endpoint. `refresh_pool()` (Phase 5, #029)
+consumes `fetch_problems()` and upserts into `leetcode_problems`.
 
 The endpoint is unauthenticated for all queries used here (verified by
 probing 2026-07-27 — see issue #012). Cloudflare sits in front; a block may
@@ -32,6 +32,9 @@ from tenacity import (
     wait_exponential,
 )
 
+from leetcode_coach.config import get_settings
+from leetcode_coach.db.base import get_session
+from leetcode_coach.db.models import LeetCodeProblem
 from leetcode_coach.errors import LeetCodeFetchError
 
 log = structlog.get_logger("leetcode")
@@ -220,3 +223,60 @@ def _mock_pool() -> list[ProblemRecord]:
         )
         for slug, title, diff, tags in canned
     ]
+
+
+async def refresh_pool() -> int:
+    """Fetch the user's recent accepted submissions and upsert into
+    `leetcode_problems` (FR-4.1).
+
+    The upsert preserves user-tracked state on existing rows:
+    - `solved` — never reset to false by a refresh (a problem solved once
+      stays solved; the LeetCode AC list only grows).
+    - `times_attempted` — never decremented.
+    - `last_attempted` — never overwritten with None.
+
+    For new rows (slug not in DB): inserted with `solved = true` (the user
+    has an AC submission, per the recent-ac list we just fetched) and
+    `times_attempted = 1`.
+
+    Returns the number of rows upserted (inserts + updates). On a
+    Cloudflare block or fetch failure, `fetch_problems` raises
+    `LeetCodeFetchError` — the Browserless fallback is a stub in v1
+    (FR-4.2 / architecture.md §12). The caller (`_safe_refresh_pool` in
+    cron.py) wraps this in the #008 alert handler.
+    """
+    settings = get_settings()
+    records = await fetch_problems(settings.leetcode_username)
+    upserted = 0
+    with next(get_session()) as session:
+        for rec in records:
+            existing = session.get(LeetCodeProblem, rec.slug)
+            if existing is None:
+                # New problem: the user has an AC submission for it, so
+                # mark solved=true + times_attempted=1.
+                session.add(
+                    LeetCodeProblem(
+                        slug=rec.slug,
+                        title=rec.title,
+                        url=rec.url,
+                        difficulty=rec.difficulty,
+                        tags=",".join(rec.tags),
+                        solved=True,
+                        times_attempted=1,
+                    )
+                )
+            else:
+                # Existing row: refresh metadata, preserve user state.
+                # `solved` only ever flips false→true (an AC submission
+                # confirms solved); never true→false.
+                existing.title = rec.title
+                existing.url = rec.url
+                existing.difficulty = rec.difficulty
+                existing.tags = ",".join(rec.tags)
+                if not existing.solved:
+                    existing.solved = True
+                session.add(existing)
+            upserted += 1
+        session.commit()
+    log.info("leetcode_refresh_done", upserted=upserted, username=settings.leetcode_username)
+    return upserted

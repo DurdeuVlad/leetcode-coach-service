@@ -42,28 +42,33 @@ returns 200, `alembic upgrade head` creates all 4 tables.
 **Goal:** every external service is reachable through a typed client with
 retries and typed errors. No flow logic yet.
 
-- [ ] `integrations/telegram.py` — `set_webhook`, `send_message`,
+- [x] `integrations/telegram.py` — `set_webhook`, `send_message`,
       `send_reply`. Retries on 5xx/timeout.
-- [ ] `integrations/llm.py` — `LLMClient` with primary + fallback per
+- [x] `integrations/llm.py` — `LLMClient` with primary + fallback per
       `architecture.md` §5. Typed `LLMResponse` with `tokens_in`, `tokens_out`.
-- [ ] `integrations/google_tasks.py` — `create_task`, `update_task`,
+- [x] `integrations/google_tasks.py` — `create_task`, `update_task`,
       `mark_complete` (with `notes_append`, **not** replace — this fixes the
       n8n bug where notes were dropped on completion). Typed
       `GoogleAuthExpiredError` on `invalid_grant`.
-- [ ] `integrations/leetcode.py` — `refresh_pool()` GraphQL pull. Stub the
+- [x] `integrations/leetcode.py` — `refresh_pool()` GraphQL pull. Stub the
       Browserless fallback (log "GraphQL failed, Browserless not configured"
       and re-raise for now).
-- [ ] `integrations/youtube.py` — `search_walkthroughs(title)`. Optional;
+- [x] `integrations/youtube.py` — `search_walkthroughs(title)`. Optional;
       raises `YouTubeDisabled` if `YOUTUBE_API_KEY` is unset.
-- [ ] `errors.py` — typed exception hierarchy + `send_alert(message)` that
+- [x] `errors.py` — typed exception hierarchy + `send_alert(message)` that
       posts to Telegram.
-- [ ] Tests for each client with `respx` mocks. Specifically:
+- [x] Tests for each client with `respx` mocks. Specifically:
       `test_llm_fallback.py` (primary 500 → fallback fires),
       `test_google_auth_branch.py` (`invalid_grant` → `GoogleAuthExpiredError`
       → alert message, **not** a generic crash).
 
 **Exit criteria:** every client has a passing test suite. The Google auth
 branch is verified to send the distinct alert message, not a generic crash.
+✅ Met — 25/25 Phase 1 tests green (`test_telegram`, `test_llm_fallback`,
+`test_google_auth_branch`, `test_leetcode`, `test_youtube`). The
+`test_smoke.py::test_health_ok` failure is a pre-existing Phase 0
+infrastructure test requiring a live Postgres at `localhost:5432`, unrelated
+to Phase 1.
 
 ## Phase 2 — Flow A (daily candidates) (1 session)
 

@@ -396,4 +396,3 @@ async def test_propose_5_rejects_invalid_llm_output(sqlite_session_factory):
 
     with pytest.raises(ProposeValidationError, match="expected exactly 5"):
         await propose_5(llm=mock_llm, chat_id="123456")
-

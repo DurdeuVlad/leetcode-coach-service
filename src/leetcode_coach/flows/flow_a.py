@@ -26,7 +26,7 @@ from sqlmodel import select
 
 from leetcode_coach.config import get_settings
 from leetcode_coach.db.base import get_session
-from leetcode_coach.db.models import LeetCodeLog, LeetCodeProblem, TutorLesson
+from leetcode_coach.db.models import DailyCandidate, LeetCodeLog, LeetCodeProblem, TutorLesson
 from leetcode_coach.errors import LeetCodeCoachError
 from leetcode_coach.integrations.llm import LLMClient
 from leetcode_coach.integrations.telegram import send_message
@@ -171,12 +171,51 @@ def _validate_candidates(candidates: Sequence[dict]) -> None:
         )
 
 
+def _persist_candidates(candidates: Sequence[dict]) -> None:
+    """Persist the 5 candidates into `daily_candidates` for Flow B's pick-parse.
+
+    Issue #020 decision: a dedicated `daily_candidates` table (keyed by
+    `proposed_at` + `pick_index`) — NOT pre-inserted `pending_review` rows.
+    Preserves the FR-2.2 routing invariant (the 5-list message_id is never
+    in `pending_review`).
+
+    Idempotent: deletes today's existing rows first, then inserts 5. This
+    makes a re-run of Flow A (manual or via a missed-cron catch-up) replace
+    rather than duplicate. YAGNI: no historical archive.
+    """
+    today = datetime.date.today()
+    with next(get_session()) as session:
+        # Idempotent re-run: clear today's rows before inserting.
+        existing = session.exec(
+            select(DailyCandidate).where(DailyCandidate.proposed_at == today)
+        ).all()
+        for row in existing:
+            session.delete(row)
+        for idx, c in enumerate(candidates, start=1):
+            session.add(
+                DailyCandidate(
+                    proposed_at=today,
+                    pick_index=idx,
+                    slug=str(c["slug"]),
+                    title=str(c["title"]),
+                    url=str(c["url"]),
+                    tags=str(c["tags"]),
+                    difficulty=str(c["difficulty"]),
+                    reasoning=str(c.get("reasoning", "")),
+                    coaching_hint=str(c.get("coaching_hint", "")),
+                )
+            )
+        session.commit()
+    log.info("flow_a_persisted_candidates", count=len(candidates), date=today.isoformat())
+
+
 async def propose_5(
     *,
     llm: LLMClient | None = None,
     chat_id: str | None = None,
 ) -> str:
-    """Run the daily proposal: gather data, call LLM, parse, send to Telegram.
+    """Run the daily proposal: gather data, call LLM, parse, send to Telegram,
+    then persist the 5 candidates for Flow B's pick-parse path (#020).
 
     Returns the `candidate_list_markdown` that was sent (useful for tests and
     for #020 to persist alongside the candidates).
@@ -207,6 +246,10 @@ async def propose_5(
     _validate_candidates(candidates)
 
     await send_message(target_chat, markdown)
+    # Persist the 5 candidates so Flow B's pick-parse can map reply numbers
+    # → problems (issue #020). Done AFTER the send so a send failure doesn't
+    # leave stale candidates; a persist failure here is loud (NFR-1 layer 2).
+    _persist_candidates(candidates)
     log.info(
         "flow_a_sent",
         chars=len(markdown),

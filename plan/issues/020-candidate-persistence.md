@@ -49,3 +49,40 @@ See [#034](034-engineering-principles-layers.md). KISS is the tie-breaker.
 - Recommended default: a `daily_candidates` table keyed by date + index, unless
   evaluation shows the pre-inserted-rows approach is clearly simpler. Record the
   final call here.
+
+## Decision (resolved 2026-07-28)
+
+**Chosen: `daily_candidates` table** (the recommended default), keyed by
+`(proposed_at, pick_index)` with `pick_index` 1-based (1..5).
+
+### Why over pre-inserted `pending_review` rows (`status = proposed`)
+1. **Routing invariant (FR-2.2) is preserved cleanly.** The 5-list Telegram
+   message_id is never stored in `pending_review`, so a reply to the 5-list
+   → `pending_review` lookup misses → pick-parse path. Pre-inserted rows
+   would require either storing the 5-list message_id (breaking the
+   invariant) or a `status = proposed` filter that the lookup node would
+   have to remember to apply — fragile.
+2. **`pending_review` semantics stay clean.** It holds only per-problem
+   threads (the rows the coach pass looks up by `message_id`). No
+   `proposed`/`open` status split to reason about.
+3. **Expiry sweep (FR-3) is simpler.** It sweeps `pending_review` where
+   `status = open` — no need to exclude `proposed` rows or worry about
+   expiring the 5-list itself.
+4. **≤2-open-per-day rule** is enforced by Flow B's pick cap (≤2 picks);
+   `pending_review` only ever receives rows for picked problems.
+
+### Tradeoffs accepted
+- One extra table + migration (0003). Minor.
+- `daily_candidates` rows are write-once per day (Flow A replaces today's
+  rows if it re-runs). No historical archive — YAGNI per the issue.
+
+### Wiring
+- **Write (Flow A, #016):** after sending the 5-list message, delete
+  today's existing `daily_candidates` rows (idempotent re-run) and insert
+  5 rows (one per candidate, `pick_index` 1..5).
+- **Read (Flow B pick-parse, #022):** `SELECT * FROM daily_candidates WHERE
+  proposed_at = today ORDER BY pick_index`. Map user pick numbers (1-based)
+  → rows by `pick_index`.
+
+Reflected in: `db/models.py::DailyCandidate`, `alembic/versions/0003_daily_candidates.py`,
+`docs/architecture.md` §7.

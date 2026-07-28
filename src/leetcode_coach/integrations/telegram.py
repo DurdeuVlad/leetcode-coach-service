@@ -44,6 +44,17 @@ def _is_mock() -> bool:
     return not token or token == "mock"
 
 
+def _enforce_allowlist(chat_id: str) -> None:
+    """NFR-4: only the configured TELEGRAM_CHAT_ID is a valid target.
+
+    Reject any other chat_id before it reaches the API. This is the
+    single-user allowlist — the bot must never broadcast to arbitrary chats.
+    """
+    allowed = str(get_settings().telegram_chat_id)
+    if str(chat_id) != allowed:
+        raise TelegramError(f"chat_id {chat_id} not in allowlist (expected {allowed})")
+
+
 async def set_webhook(webhook_url: str) -> None:
     """Tell Telegram to POST updates to `webhook_url`.
 
@@ -69,7 +80,11 @@ async def send_message(chat_id: str, text: str, *, reply_markup: dict | None = N
     `errors.send_alert` (alerts). `reply_markup` accepts an
     `InlineKeyboardMarkup`-shaped dict for the 5-button pick UI in Flow B.
     Returns -1 in mock mode.
+
+    NFR-4: only the configured `TELEGRAM_CHAT_ID` is a valid target. Any
+    other chat_id is rejected before hitting the API.
     """
+    _enforce_allowlist(chat_id)
     if _is_mock():
         log.info("send_message_mock", chat_id=chat_id, text=text[:200])
         return -1
@@ -88,7 +103,10 @@ async def send_reply(
     Used by Flow B's per-problem coach feedback. `reply_to_message_id` is
     the inbound `Message.message_id` being replied to (not `update_id`).
     Returns -1 in mock mode.
+
+    NFR-4: only the configured `TELEGRAM_CHAT_ID` is a valid target.
     """
+    _enforce_allowlist(chat_id)
     if _is_mock():
         log.info(
             "send_reply_mock",
@@ -142,11 +160,13 @@ async def _call(method: str, payload: dict) -> dict:
     data = resp.json()
     if not data.get("ok"):
         raise TelegramError(f"telegram {method} not ok: {data}")
+    result = data.get("result")
+    message_id = result.get("message_id") if isinstance(result, dict) else None
     log.info(
         "telegram_call",
         method=method,
         chars_sent=len(payload.get("text", "")),
-        message_id=data.get("result", {}).get("message_id"),
+        message_id=message_id,
         duration_ms=duration_ms,
     )
     return data

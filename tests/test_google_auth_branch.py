@@ -37,7 +37,11 @@ async def test_invalid_grant_raises_google_auth_expired_error() -> None:
             },
         )
     )
-    with pytest.raises(GoogleAuthExpiredError):
+    # The exact typed exception is what the flow layer routes to the distinct
+    # GoogleAuthExpired alert (architecture.md §6) — NOT the generic 500 crash
+    # path. Asserting the message confirms we surface the root cause, not a
+    # bare exception.
+    with pytest.raises(GoogleAuthExpiredError, match="invalid_grant"):
         await google_tasks.create_task("Two Sum", "notes", "2026-07-28")
 
 
@@ -48,7 +52,7 @@ async def test_api_401_raises_google_auth_expired_error_not_generic_crash() -> N
     the distinct GoogleAuthExpiredError, never a bare exception/500 crash."""
     _mock_token_ok()
     respx.post(url__regex=_TASK_URL_RE + r"$").mock(return_value=httpx.Response(401))
-    with pytest.raises(GoogleAuthExpiredError):
+    with pytest.raises(GoogleAuthExpiredError, match="401"):
         await google_tasks.create_task("Two Sum", "notes", "2026-07-28")
 
 

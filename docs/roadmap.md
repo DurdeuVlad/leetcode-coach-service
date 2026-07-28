@@ -107,43 +107,43 @@ message with code triggers the coach pass and closes the loop.
 
 ### Phase 3a — Pick-parse path
 
-- [ ] `webhooks/telegram.py` — `POST /telegram/webhook` →
+- [x] `webhooks/telegram.py` — `POST /telegram/webhook` →
       `flow_b.handle_update(update)`.
-- [ ] `flows/flow_b.py` — correlation logic:
+- [x] `flows/flow_b.py` — correlation logic:
       - `update.message.reply_to_message` present → look up
         `pending_review` by `message_id`.
       - Not present → fuzzy match against today's open rows.
       - Zero/multiple fuzzy matches → clarification prompt, stop.
-- [ ] Pick parse: regex `\d+`, cap at 2, map to today's 5-list candidates.
+- [x] Pick parse: regex `\d+`, cap at 2, map to today's 5-list candidates.
       (The 5-list candidate array must be persisted somewhere Flow B can
       read it — store it in a `daily_candidates` table or in
       `pending_review` rows pre-inserted with `status = proposed`. Decide
       in this phase; document the choice.)
-- [ ] For each pick: send per-problem Telegram message (capture
+- [x] For each pick: send per-problem Telegram message (capture
       `message_id`), create Google Task (capture `task_id`), insert
       `pending_review` row.
-- [ ] Tests: `test_flow_b.py` pick-parse path with mocked Telegram + Google
+- [x] Tests: `test_flow_b.py` pick-parse path with mocked Telegram + Google
       Tasks. Asserts 2 messages, 2 tasks, 2 rows.
 
 ### Phase 3b — Coach pass path
 
-- [ ] `prompts/coach.py` — system + user prompt, ported verbatim from
+- [x] `prompts/coach.py` — system + user prompt, ported verbatim from
       `n8n-reference/workflows/flow-b-telegram-and-coach.json` AI Agent node
       `text` field (the long one with the 5 coaching dimensions + lesson
       decision instructions).
-- [ ] Coach pass: call `LLMClient`, parse the structured response
+- [x] Coach pass: call `LLMClient`, parse the structured response
       (`tutor_feedback`, `lesson_title`, `lesson_category`,
       `lesson_should_graduate`, `status`, `time_spent_min`).
-- [ ] Lesson decision (`Code (lesson decision)` equivalent):
+- [x] Lesson decision (`Code (lesson decision)` equivalent):
       double-gated graduation per FR-2.6.
-- [ ] Post-coach updates:
+- [x] Post-coach updates:
       1. Insert `leetcode_log` row.
       2. If solved → mark `leetcode_problems.solved = true`.
       3. **Fix the n8n bug:** `google_tasks.mark_complete(task_id,
          notes_append=tutor_feedback)` — append, don't replace.
       4. Update `pending_review.status = done`.
       5. Send Telegram confirmation naming any lesson saved/reinforced/retired.
-- [ ] Tests: `test_flow_b.py` coach path with mocked LLM returning a canned
+- [x] Tests: `test_flow_b.py` coach path with mocked LLM returning a canned
       coach response. Asserts all 5 post-coach updates happen in order.
       Golden-output test for the lesson-decision double gate (coach says
       graduate but DB count is 4 → bump, not graduate).

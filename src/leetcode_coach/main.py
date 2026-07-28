@@ -24,6 +24,7 @@ from sqlalchemy import text
 from leetcode_coach.config import get_settings
 from leetcode_coach.db.base import engine
 from leetcode_coach.scheduling.cron import is_running, start_scheduler, stop_scheduler
+from leetcode_coach.webhooks.telegram import router as telegram_router
 
 
 def _configure_logging(level: str) -> None:
@@ -66,6 +67,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="LeetCode Coach", version="0.1.0", lifespan=lifespan)
+# Inbound Telegram webhook (#019) — the single inbound HTTP surface.
+app.include_router(telegram_router)
 
 
 @app.get("/health")

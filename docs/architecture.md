@@ -207,6 +207,19 @@ via Alembic. Notable choices:
 - `tutor_lessons.title` is not unique by DB constraint (the coach may surface
   near-duplicates); dedup is by similarity match in `flow_b.py` before insert.
 - All timestamps are `DATE` (not `TIMESTRTZ`) — the system is single-timezone.
+- `daily_candidates` (added in issue #020) persists Flow A's 5-candidate list
+  so Flow B's pick-parse path can map reply numbers → problems. Chosen over
+  pre-inserted `pending_review` rows with `status = proposed` because:
+  - **Routing invariant (FR-2.2):** the 5-list Telegram message_id must never
+    be in `pending_review` — otherwise a reply to the 5-list would be
+    indistinguishable from a reply to a per-problem thread. A dedicated
+    table keeps `pending_review` semantics clean (only per-problem threads).
+  - **Expiry sweep (FR-3):** sweeps only `pending_review` (per-problem
+    threads), not the 5-list candidates — no extra `status` filter needed.
+  - **≤2-open-per-day rule:** enforced by Flow B's pick cap (≤2 picks), not
+    by this table; `pending_review` only gets rows for picked problems.
+  YAGNI: no historical candidate archive — just enough to map a pick number
+  → problem for today. Keyed by `(proposed_at, pick_index)` (1-based, 1..5).
 
 ## 8. Configuration (env vars)
 

@@ -18,10 +18,12 @@ resolve the open decisions without it.
 - [ ] **Golden-output suite for the coach pass:** collect ~10 real coach
       responses, manually rate them, lock as regression baselines (extends
       #027).
-- [ ] **SearXNG fallback for YouTube** — only if the YouTube Data API quota
-      actually becomes a problem (§8.3; unlikely at ~1 search/day).
-- [ ] **Browserless fallback for LeetCode GraphQL** — only if the endpoint
-      actually rate-limits/blocks the homelab IP (§8.4). Replaces the #012 stub.
+- [x] ~~**SearXNG fallback for YouTube**~~ — **Resolved 2026-07-28:** SearXNG
+      is now the primary YouTube backend; YouTube Data API dropped entirely
+      (§8.3). See `integrations/youtube.py`.
+- [x] ~~**Browserless fallback for LeetCode GraphQL**~~ — **Resolved
+      2026-07-28:** Browserless is now the primary (and only) path for
+      LeetCode GraphQL (§8.4). See `integrations/leetcode.py`.
 - [ ] **Lesson wording calibration** (§8.2) after seeing 5-10 real lessons.
 - [ ] **Reconsider Google Tasks integration** (§8.5) if it causes more ops pain
       than value.

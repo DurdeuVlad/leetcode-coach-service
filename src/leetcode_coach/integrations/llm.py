@@ -227,7 +227,7 @@ _MOCK_PROPOSE: dict[str, Any] = {
         "1. *Two Sum* — array,hash-map — easy — https://leetcode.com/problems/two-sum/\n"
         "   Why: warmup; targets your 'check empty input' lesson.\n"
         "   Hint: before writing code, ask: can I trade space for time?\n"
-        "2. *Binary Search* — array,binary-search — easy — https://leetcode.com/problems/binary-search/\n"
+        "2. *Binary Search* — array,binary-search — hard — https://leetcode.com/problems/binary-search/\n"
         "   Why: reinforces your 'off-by-one on inclusive bounds' lesson.\n"
         "   Hint: pick your bounds convention (inclusive vs half-open) and stick with it.\n"
         "3. *Longest Substring Without Repeating Characters* — hash-map,two-pointers — medium — https://leetcode.com/problems/longest-substring-without-repeating-characters/\n"
@@ -255,7 +255,7 @@ _MOCK_PROPOSE: dict[str, Any] = {
             "title": "Binary Search",
             "url": "https://leetcode.com/problems/binary-search/",
             "tags": "array,binary-search",
-            "difficulty": "easy",
+            "difficulty": "hard",
             "reasoning": "reinforces your 'off-by-one on inclusive bounds' lesson.",
             "coaching_hint": "pick your bounds convention (inclusive vs half-open) and stick with it.",
         },

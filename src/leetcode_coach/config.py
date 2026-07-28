@@ -34,6 +34,9 @@ class Settings(BaseSettings):
     telegram_webhook_url: str = Field(
         "", description="Public HTTPS URL Telegram will POST updates to"
     )
+    telegram_webhook_secret: str = Field(
+        "", description="Secret token echoed back in X-Telegram-Bot-Api-Secret-Token"
+    )
 
     # LLM
     openai_api_key: str = Field(..., description="OpenAI API key (primary model)")

@@ -255,9 +255,7 @@ def _fuzzy_title_match(text: str, rows: list[PendingReview]) -> list[PendingRevi
 # ===========================================================================
 
 
-async def _pick_parse_path(
-    chat_id: str, text: str, *, dry_run: bool = False
-) -> list[dict]:
+async def _pick_parse_path(chat_id: str, text: str, *, dry_run: bool = False) -> list[dict]:
     """Parse a pick-list reply (e.g. '2 5') into ≤2 chosen problems, then
     create per-problem threads, Google Tasks, and pending_review rows.
 

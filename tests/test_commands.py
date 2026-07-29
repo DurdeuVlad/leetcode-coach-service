@@ -158,7 +158,9 @@ async def test_unknown_command_replies_and_no_side_effects():
 
     sent = []
     with (
-        patch.object(commands_module, "send_message", AsyncMock(side_effect=lambda c, t: sent.append(t))),
+        patch.object(
+            commands_module, "send_message", AsyncMock(side_effect=lambda c, t: sent.append(t))
+        ),
         patch.object(commands_module, "flow_a") as flow_a_mock,
         patch.object(commands_module, "flow_b") as flow_b_mock,
     ):
@@ -220,7 +222,9 @@ async def test_non_text_update_returns_false():
 # ===========================================================================
 
 
-def _insert_lesson(engine, *, title: str, category: str = "arrays", count: int = 3, active: bool = True):
+def _insert_lesson(
+    engine, *, title: str, category: str = "arrays", count: int = 3, active: bool = True
+):
     from leetcode_coach.db import models as db_models
 
     with Session(engine) as session:
@@ -318,7 +322,13 @@ async def test_status_shows_lessons_log_and_streak(sqlite_session_factory):
     _insert_lesson(sqlite_session_factory, title="Sliding Window", count=5)
     _insert_lesson(sqlite_session_factory, title="Two Pointers", count=2)
     _insert_lesson(sqlite_session_factory, title="Old Lesson", count=10, active=False)
-    _insert_log_entry(sqlite_session_factory, slug="two-sum", date=today, status="solved", lesson_title="Two Pointers")
+    _insert_log_entry(
+        sqlite_session_factory,
+        slug="two-sum",
+        date=today,
+        status="solved",
+        lesson_title="Two Pointers",
+    )
     _insert_log_entry(sqlite_session_factory, slug="three-sum", date=yesterday, status="reviewed")
 
     update = _make_update(text="/status")
@@ -351,7 +361,9 @@ async def test_status_shows_lessons_log_and_streak(sqlite_session_factory):
 @pytest.mark.asyncio
 async def test_status_streak_zero_when_no_coached(sqlite_session_factory):
     """/status with no coached attempts → streak = 0."""
-    _insert_log_entry(sqlite_session_factory, slug="x", date=datetime.date.today(), status="skipped")
+    _insert_log_entry(
+        sqlite_session_factory, slug="x", date=datetime.date.today(), status="skipped"
+    )
 
     update = _make_update(text="/status")
     sent = []
@@ -608,9 +620,7 @@ def _insert_pending_review(
 @pytest.mark.asyncio
 async def test_coach_single_open_review_no_slug_coaches_it(sqlite_session_factory):
     """1 open review, /coach <code> (no slug) → coaches that review."""
-    _insert_pending_review(
-        sqlite_session_factory, message_id=50, problem_slug="two-sum"
-    )
+    _insert_pending_review(sqlite_session_factory, message_id=50, problem_slug="two-sum")
     update = _make_update(text="/coach def foo(): pass")
 
     coach_calls = []
@@ -634,9 +644,7 @@ async def test_coach_single_open_review_no_slug_coaches_it(sqlite_session_factor
 @pytest.mark.asyncio
 async def test_coach_slug_targets_correct_review(sqlite_session_factory):
     """2 open reviews, /coach two-sum <code> → coaches the two-sum row."""
-    _insert_pending_review(
-        sqlite_session_factory, message_id=50, problem_slug="two-sum"
-    )
+    _insert_pending_review(sqlite_session_factory, message_id=50, problem_slug="two-sum")
     _insert_pending_review(
         sqlite_session_factory,
         message_id=51,
@@ -665,9 +673,7 @@ async def test_coach_slug_targets_correct_review(sqlite_session_factory):
 @pytest.mark.asyncio
 async def test_coach_two_open_reviews_no_slug_replies_with_list(sqlite_session_factory):
     """2 open reviews, /coach <code> (no slug) → reply lists both, no coach call."""
-    _insert_pending_review(
-        sqlite_session_factory, message_id=50, problem_slug="two-sum"
-    )
+    _insert_pending_review(sqlite_session_factory, message_id=50, problem_slug="two-sum")
     _insert_pending_review(
         sqlite_session_factory,
         message_id=51,
@@ -722,9 +728,7 @@ async def test_coach_zero_open_reviews_replies_no_open_problems(sqlite_session_f
 async def test_coach_reply_to_problem_message_uses_message_id(sqlite_session_factory):
     """Reply-to a problem message with /coach <code> → coaches the review
     whose message_id matches the replied-to message."""
-    _insert_pending_review(
-        sqlite_session_factory, message_id=50, problem_slug="two-sum"
-    )
+    _insert_pending_review(sqlite_session_factory, message_id=50, problem_slug="two-sum")
     update = _make_update(text="/coach def foo(): pass", reply_to_message_id=50)
 
     coach_calls = []
@@ -747,9 +751,7 @@ async def test_coach_reply_to_problem_message_uses_message_id(sqlite_session_fac
 @pytest.mark.asyncio
 async def test_coach_reply_to_non_problem_message_replies_error(sqlite_session_factory):
     """Reply-to a message_id not in pending_review → error reply, no coach call."""
-    _insert_pending_review(
-        sqlite_session_factory, message_id=50, problem_slug="two-sum"
-    )
+    _insert_pending_review(sqlite_session_factory, message_id=50, problem_slug="two-sum")
     # Reply to message 999 which is not a problem thread.
     update = _make_update(text="/coach code", reply_to_message_id=999)
 

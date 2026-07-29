@@ -224,6 +224,49 @@ next day. All four tables have real rows. Cost log shows <$0.20 for the day.
 - [ ] Golden-output test suite for the coach pass: collect 10 real coach
       responses, manually rate them, lock them as regression baselines.
 
+## Phase 8 — Interactive control + progression visibility (1-2 sessions)
+
+Makes the bot interactive on Telegram (slash commands), surfaces the
+adaptability loop to the user (progression queries), and keeps a live
+pinned snapshot. Depends on Phase 3 (Flow B) and the admin API (merged
+on dev as of 2026-07-29) — the `dry_run`-capable flow internals are the
+template for the command handlers.
+
+### Phase 8a — Slash commands (FR-6)
+- [ ] Command router: parse `/`-prefixed messages before FR-2.2 reply
+      correlation (`flow_b.handle_update`).
+- [ ] `/propose` → call `flow_a.propose_5(dry_run=False)`.
+- [ ] `/pick <n1> [<n2>]` → call `flow_b._pick_parse_path` with the parsed
+      indices.
+- [ ] `/coach <text>` (and `/coach <slug> <text>` form) → call
+      `flow_b._coach_pass_path` + `_post_coach_updates`.
+- [ ] Unknown command → short "unknown command" reply, no LLM, no DB write.
+- [ ] Tests: command router dispatch, each command path, unknown command,
+      non-allowlisted chat rejected.
+
+### Phase 8b — Progression queries (FR-7)
+- [ ] `/status` → deterministic text dump (active lessons, last 7 days of
+      `leetcode_log`, current streak). No LLM call.
+- [ ] `/why <slug>` → single LLM call, 2-3 sentences on why a problem was
+      proposed / what lesson it targets.
+- [ ] Tests: `/status` output shape against seeded DB; `/why` mocked LLM
+      single-call bound.
+
+### Phase 8c — Pinned progression message (FR-8)
+- [ ] `bot_state` table + Alembic migration (key/value/updated_at).
+- [ ] `integrations/telegram.py`: `edit_message_text`, `pin_message`,
+      `unpin_message` helpers.
+- [ ] Snapshot builder: today's status counts, active lessons count,
+      current streak.
+- [ ] Refresh hook called after Flow A run, Flow B pick, Flow B coach.
+- [ ] Recovery: if `editMessageText` fails, create + pin a new message and
+      store the new ID in `bot_state`.
+- [ ] Tests: snapshot builder, refresh hook, recovery path.
+
+**Exit criteria:** from Telegram, `/propose` → `/pick 1` → `/coach <code>`
+runs the full pipeline; `/status` shows the just-coached attempt; the pinned
+message updates after each step. All tests green.
+
 ## What we explicitly defer
 
 - Multi-user support (out of scope §7).

@@ -52,14 +52,16 @@ the bot."
   - `coaching_hint` (1 line, drawn from active lessons).
 - **FR-1.6** The proposal is one Telegram message, numbered list, with reasoning
   visible per candidate. The flow then **ends** — it does not wait for the reply.
-  Replies are handled by Flow B (FR-2).
+  Replies are handled by Flow B (FR-2). On-demand trigger via `/propose` (FR-6)
+  also starts Flow A; the flow still ends after sending.
 - **FR-1.7** The LLM must never invent problem titles or URLs. If it cannot confirm
   a problem exists from the pool, it must skip it.
 
 ### FR-2 — Reply routing and coach pass (Flow B)
 
 - **FR-2.1** A single Telegram webhook receives all incoming messages. Routing is
-  data-driven, not text-driven.
+  data-driven (reply-to-message correlation per FR-2.2), with one text-driven
+  exception: slash commands (FR-6) are parsed before data-driven routing.
 - **FR-2.2** Correlation priority:
   1. If the incoming message has `reply_to_message.message_id`, look up
      `pending_review` by that exact `message_id`. Found → coach pass path.
@@ -141,9 +143,49 @@ the bot."
   just logging attempts. A regression here is a regression in the core value
   of the system.
 
+### FR-6 — Slash commands (interactive control)
+
+- **FR-6.1** The bot recognizes a fixed set of slash commands. If a message
+  starts with `/`, it is routed as a command before FR-2.2 reply correlation
+  runs.
+- **FR-6.2** `/propose` — trigger Flow A immediately. Same effect as the 09:05
+  cron. Cron still runs on schedule; commands are additive.
+- **FR-6.3** `/pick <n1> [<n2>]` — trigger Flow B pick-parse path with the
+  given 1-based indices. Same effect as replying "1 2" to the 5-list message.
+- **FR-6.4** `/coach <text>` — trigger Flow B coach pass. If >1
+  `pending_review` is open today, requires a target: `/coach <slug> <text>`
+  or a reply-to. No target → short error, no LLM call.
+- **FR-6.5** Commands only work from the allowlisted chat ID (NFR-4). No new
+  auth surface.
+- **FR-6.6** Unknown command → short "unknown command" message, no LLM call,
+  no DB write.
+
+### FR-7 — Progression queries (read-only)
+
+- **FR-7.1** `/status` — reply with a structured text dump (no LLM call):
+  active lessons (title + `times_reinforced`), last 7 days of `leetcode_log`
+  (date, problem, solved?, lesson), current streak (consecutive days with
+  ≥1 coached attempt). Cheap and deterministic.
+- **FR-7.2** `/why <slug>` — one LLM call, 2-3 sentences, explaining why a
+  problem was proposed or what lesson it targets. Bounded to a single call.
+- **FR-7.3** Progression queries are read-only: they never insert or update
+  any row.
+
+### FR-8 — Pinned progression message
+
+- **FR-8.1** The bot maintains one pinned message in the allowlisted chat with
+  a compact snapshot: today's status counts (proposed/picked/coached/expired),
+  active lessons count, current streak.
+- **FR-8.2** Refresh trigger: updated after each Flow A run, Flow B pick, and
+  Flow B coach pass — whenever the snapshot's inputs change. No new cron job.
+- **FR-8.3** The pinned message ID is stored in a new `bot_state` key-value
+  table (not an env var) so it can be updated without redeploying.
+- **FR-8.4** If `editMessageText` fails (message deleted, permissions
+  changed), the bot creates a new pinned message and stores the new ID.
+
 ## 5. Data model
 
-Four tables. Column names are case-sensitive and referenced by name in code.
+Five tables. Column names are case-sensitive and referenced by name in code.
 
 ### `leetcode_problems`
 | Column | Type | Notes |
@@ -185,6 +227,18 @@ Four tables. Column names are case-sensitive and referenced by name in code.
 | `created_at` | date | first seen |
 | `times_reinforced` | number | default `1`; bumped when the same pattern recurs |
 | `active` | boolean | default `true`; set `false` when mastered |
+
+### `bot_state` — key-value store for runtime state (FR-8)
+| Column | Type | Notes |
+|---|---|---|
+| `key` | string | primary key, e.g. `pinned_message_id` |
+| `value` | string | JSON-encoded value; consumer parses per key |
+| `updated_at` | timestamptz | set on every write |
+
+A single-row-per-key store for runtime state that must survive restarts but
+should not require a redeploy to change. Currently used only for the pinned
+progression message ID (FR-8.3). Add keys as new stateful features arrive;
+do not add columns to existing tables for one-off state.
 
 ## 6. Non-functional requirements
 
@@ -235,6 +289,8 @@ Four tables. Column names are case-sensitive and referenced by name in code.
 - Pushing lessons back to Anki or any other spaced-repetition system.
 - Automated mock interviews (the Moonshot Plan covers those separately via
   Pramp / interviewing.io).
+- Free-form conversational AI (multi-turn chat with tool use). v1 is one-shot
+  LLM calls only. See `architecture.md` §12.
 
 ## 8. Open decisions (resolve before Phase 2 of the roadmap)
 

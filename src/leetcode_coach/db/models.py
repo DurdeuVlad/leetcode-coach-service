@@ -124,3 +124,32 @@ class DailyCandidate(SQLModel, table=True):
     difficulty: str = Field(max_length=10)  # easy / medium / hard
     reasoning: str = Field(default="", max_length=1000)
     coaching_hint: str = Field(default="", max_length=1000)
+
+
+class BotState(SQLModel, table=True):
+    """Generic key-value table for runtime state that must survive restarts
+    but should not require a redeploy to change (issue #036).
+
+    First and currently only use: the pinned progression message ID
+    (FR-8.3, #039) under key ``pinned_message_id``.
+
+    Schema (business-requirements.md §5):
+    - ``key``: primary key (e.g. ``pinned_message_id``).
+    - ``value``: JSON-encoded string; the consumer parses per key. Keeping
+      the column a plain string avoids constraining the schema to today's
+      only use (YAGNI — no JSONB, no per-key columns).
+    - ``updated_at``: ``TIMESTAMPTZ`` (wall-clock time, not DATE) — set on
+      every write. This is the one table that needs real timestamps because
+      "last write" semantics matter for state freshness.
+
+    Intentionally generic: add keys as new stateful features arrive; do not
+    add columns to existing tables for one-off state.
+    """
+
+    __tablename__ = "bot_state"
+
+    key: str = Field(primary_key=True, max_length=100)
+    value: str = Field(default="", max_length=2000)
+    updated_at: datetime.datetime = Field(
+        default_factory=lambda: datetime.datetime.now(datetime.UTC)
+    )

@@ -41,3 +41,7 @@ Thumbs.db
 
 # Docker
 *.pid
+
+# Temporary scratch files (agent working files, not source)
+.tmp_*
+ANTIGRAVITY_DEPLOY_PROMPT.md

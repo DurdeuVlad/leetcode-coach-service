@@ -27,7 +27,9 @@ from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine, select
 
 from leetcode_coach.db import models as db_models
+from leetcode_coach.db import queries as db_queries
 from leetcode_coach.flows import flow_a, flow_b
+from leetcode_coach.flows import pinned as pinned_module
 from leetcode_coach.integrations.llm import LLMClient, LLMResponse
 from leetcode_coach.webhooks import admin as admin_module
 
@@ -68,6 +70,10 @@ def sqlite_session_factory(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(flow_a, "get_session", _get_session)
     monkeypatch.setattr(flow_b, "get_session", _get_session)
     monkeypatch.setattr(admin_module, "get_session", _get_session)
+    # #039: pinned module + db.queries also use get_session — patch them too
+    # so the refresh hook (called from admin endpoints) doesn't hit Postgres.
+    monkeypatch.setattr(pinned_module, "get_session", _get_session)
+    monkeypatch.setattr(db_queries, "get_session", _get_session)
     return engine
 
 
@@ -76,6 +82,8 @@ def admin_app(monkeypatch: pytest.MonkeyPatch):
     """FastAPI app with the admin router mounted + settings patched."""
     monkeypatch.setattr(admin_module, "get_settings", _test_settings)
     monkeypatch.setattr(flow_a, "get_settings", _test_settings)
+    # #039: pinned module reads settings (chat_id) + telegram module reads token.
+    monkeypatch.setattr(pinned_module, "get_settings", _test_settings)
 
     app = FastAPI()
     app.include_router(admin_module.router)

@@ -263,4 +263,15 @@ async def propose_5(
         tokens_out=response.tokens_out,
         dry_run=dry_run,
     )
+
+    # FR-8.2: refresh the pinned progression message after Flow A runs.
+    # Fire-and-forget: a pinned-message failure must not fail the flow.
+    if not dry_run:
+        try:
+            from leetcode_coach.flows.pinned import refresh_pinned_message
+
+            await refresh_pinned_message()
+        except Exception:
+            log.warning("pinned_refresh_failed_after_propose")
+
     return markdown

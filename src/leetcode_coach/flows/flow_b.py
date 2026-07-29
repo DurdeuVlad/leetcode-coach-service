@@ -141,7 +141,10 @@ async def handle_update(update: Update) -> None:
     `_pick_parse_path` (#022) or `_coach_pass_path` (#024+#025+#026). It
     performs no side effects beyond the delegation.
 
-    Routing priority (FR-2.2):
+    Routing priority (FR-2.1 amended, FR-6):
+    0. Slash command (FR-6): if the message starts with `/`, dispatch via
+       `flows.commands.route_command` and return. This is the text-driven
+       exception to the data-driven rule below.
     1. reply_to_message.message_id present:
        - found in pending_review (today, any status) → coach pass
        - not found → pick-parse (reply was to the 5-list)
@@ -156,6 +159,16 @@ async def handle_update(update: Update) -> None:
         # current Flow A sends plain text; revisit if/when Flow A adds
         # reply_markup). Silent drop.
         log.info("flow_b_skip_non_text", update_id=update.update_id)
+        return
+
+    # FR-6: slash commands are parsed BEFORE data-driven routing. The
+    # router returns True if it handled the message (recognized or unknown
+    # command); False if the message is not `/`-prefixed and we should
+    # fall through to FR-2.2. Imported lazily to avoid a circular import
+    # at module load (commands.py imports flow_b for the handlers).
+    from leetcode_coach.flows.commands import route_command
+
+    if await route_command(update):
         return
 
     chat_id = msg.chat.id
@@ -353,6 +366,17 @@ async def _pick_parse_path(
                 "pending_review_id": pending_review_id,
             }
         )
+
+    # FR-8.2: refresh the pinned progression message after picks are created.
+    # Fire-and-forget: a pinned-message failure must not fail the flow.
+    if not dry_run:
+        try:
+            from leetcode_coach.flows.pinned import refresh_pinned_message
+
+            await refresh_pinned_message()
+        except Exception:
+            log.warning("pinned_refresh_failed_after_pick")
+
     return created_threads
 
 
@@ -671,6 +695,17 @@ async def _post_coach_updates(
         lesson_action=lesson_outcome.action,
         dry_run=dry_run,
     )
+
+    # FR-8.2: refresh the pinned progression message after a coach pass.
+    # Fire-and-forget: a pinned-message failure must not fail the flow.
+    if not dry_run:
+        try:
+            from leetcode_coach.flows.pinned import refresh_pinned_message
+
+            await refresh_pinned_message()
+        except Exception:
+            log.warning("pinned_refresh_failed_after_coach")
+
     return reply_text
 
 

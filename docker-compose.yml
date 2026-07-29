@@ -41,6 +41,7 @@ services:
       SEARXNG_URL: ${SEARXNG_URL:-}
       BROWSERLESS_URL: ${BROWSERLESS_URL:-}
       LEETCODE_USERNAME: ${LEETCODE_USERNAME:-dummy}
+      ADMIN_API_KEY: ${ADMIN_API_KEY:-}
       TIMEZONE: ${TIMEZONE:-Europe/Bucharest}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     ports:

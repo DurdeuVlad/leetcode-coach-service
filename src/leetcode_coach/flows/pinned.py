@@ -55,9 +55,7 @@ def _build_snapshot() -> str:
     with next(get_session()) as session:
         # Proposed: today's daily_candidates count.
         proposed = session.exec(
-            select(func.count(DailyCandidate.id)).where(
-                DailyCandidate.proposed_at == today
-            )
+            select(func.count(DailyCandidate.id)).where(DailyCandidate.proposed_at == today)
         ).one()
 
         # Picked: today's pending_review with status=open (actively being worked).

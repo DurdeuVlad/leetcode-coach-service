@@ -79,7 +79,9 @@ def _insert_candidates(engine, count: int = 5):
         session.commit()
 
 
-def _insert_pending_review(engine, *, message_id: int, status: str = "open", slug: str = "problem-1"):
+def _insert_pending_review(
+    engine, *, message_id: int, status: str = "open", slug: str = "problem-1"
+):
     today = datetime.date.today()
     with Session(engine) as session:
         if session.get(db_models.LeetCodeProblem, slug) is None:
@@ -186,7 +188,10 @@ def test_snapshot_empty_db(sqlite_engine):
 @pytest.mark.asyncio
 async def test_first_refresh_creates_and_pins(sqlite_engine, monkeypatch):
     """No pinned_message_id in bot_state → create + pin + store ID."""
-    monkeypatch.setattr("leetcode_coach.flows.pinned.get_settings", lambda: type("S", (), {"telegram_chat_id": "123"})())
+    monkeypatch.setattr(
+        "leetcode_coach.flows.pinned.get_settings",
+        lambda: type("S", (), {"telegram_chat_id": "123"})(),
+    )
     sent_texts = []
 
     async def _fake_send(chat_id, text, **kw):
@@ -220,10 +225,15 @@ async def test_subsequent_refresh_edits_existing(sqlite_engine, monkeypatch):
     from leetcode_coach.db.queries import set_state
 
     set_state("pinned_message_id", "555")
-    monkeypatch.setattr("leetcode_coach.flows.pinned.get_settings", lambda: type("S", (), {"telegram_chat_id": "123"})())
+    monkeypatch.setattr(
+        "leetcode_coach.flows.pinned.get_settings",
+        lambda: type("S", (), {"telegram_chat_id": "123"})(),
+    )
 
     with (
-        patch.object(pinned_module, "edit_message_text", AsyncMock(return_value={"ok": True})) as edit_mock,
+        patch.object(
+            pinned_module, "edit_message_text", AsyncMock(return_value={"ok": True})
+        ) as edit_mock,
         patch.object(pinned_module, "send_message", AsyncMock(return_value=999)) as send_mock,
         patch.object(pinned_module, "pin_message", AsyncMock()) as pin_mock,
     ):
@@ -248,12 +258,19 @@ async def test_not_modified_is_noop(sqlite_engine, monkeypatch):
     from leetcode_coach.db.queries import set_state
 
     set_state("pinned_message_id", "555")
-    monkeypatch.setattr("leetcode_coach.flows.pinned.get_settings", lambda: type("S", (), {"telegram_chat_id": "123"})())
+    monkeypatch.setattr(
+        "leetcode_coach.flows.pinned.get_settings",
+        lambda: type("S", (), {"telegram_chat_id": "123"})(),
+    )
 
     from leetcode_coach.errors import TelegramError
 
     with (
-        patch.object(pinned_module, "edit_message_text", AsyncMock(side_effect=TelegramError("message is not modified"))),
+        patch.object(
+            pinned_module,
+            "edit_message_text",
+            AsyncMock(side_effect=TelegramError("message is not modified")),
+        ),
         patch.object(pinned_module, "send_message", AsyncMock(return_value=999)) as send_mock,
         patch.object(pinned_module, "pin_message", AsyncMock()) as pin_mock,
         patch.object(pinned_module, "unpin_message", AsyncMock()) as unpin_mock,
@@ -280,12 +297,19 @@ async def test_edit_failure_creates_new(sqlite_engine, monkeypatch):
     from leetcode_coach.db.queries import set_state
 
     set_state("pinned_message_id", "555")
-    monkeypatch.setattr("leetcode_coach.flows.pinned.get_settings", lambda: type("S", (), {"telegram_chat_id": "123"})())
+    monkeypatch.setattr(
+        "leetcode_coach.flows.pinned.get_settings",
+        lambda: type("S", (), {"telegram_chat_id": "123"})(),
+    )
 
     from leetcode_coach.errors import TelegramError
 
     with (
-        patch.object(pinned_module, "edit_message_text", AsyncMock(side_effect=TelegramError("message to edit not found"))),
+        patch.object(
+            pinned_module,
+            "edit_message_text",
+            AsyncMock(side_effect=TelegramError("message to edit not found")),
+        ),
         patch.object(pinned_module, "send_message", AsyncMock(return_value=888)) as send_mock,
         patch.object(pinned_module, "pin_message", AsyncMock()) as pin_mock,
         patch.object(pinned_module, "unpin_message", AsyncMock()) as unpin_mock,
@@ -316,16 +340,27 @@ async def test_refresh_failure_does_not_raise(sqlite_engine, monkeypatch):
     from leetcode_coach.db.queries import set_state
 
     set_state("pinned_message_id", "555")
-    monkeypatch.setattr("leetcode_coach.flows.pinned.get_settings", lambda: type("S", (), {"telegram_chat_id": "123"})())
+    monkeypatch.setattr(
+        "leetcode_coach.flows.pinned.get_settings",
+        lambda: type("S", (), {"telegram_chat_id": "123"})(),
+    )
 
     from leetcode_coach.errors import TelegramError
 
     # Both edit and send fail — the function should raise (the caller's
     # try/except is what makes it fire-and-forget, not this function).
     with (
-        patch.object(pinned_module, "edit_message_text", AsyncMock(side_effect=TelegramError("message to edit not found"))),
-        patch.object(pinned_module, "send_message", AsyncMock(side_effect=TelegramError("chat not found"))),
-        patch.object(pinned_module, "unpin_message", AsyncMock(side_effect=TelegramError("can't unpin"))),
+        patch.object(
+            pinned_module,
+            "edit_message_text",
+            AsyncMock(side_effect=TelegramError("message to edit not found")),
+        ),
+        patch.object(
+            pinned_module, "send_message", AsyncMock(side_effect=TelegramError("chat not found"))
+        ),
+        patch.object(
+            pinned_module, "unpin_message", AsyncMock(side_effect=TelegramError("can't unpin"))
+        ),
         pytest.raises(TelegramError),
     ):
         await refresh_pinned_message()
@@ -339,7 +374,10 @@ async def test_refresh_failure_does_not_raise(sqlite_engine, monkeypatch):
 @pytest.mark.asyncio
 async def test_mock_mode_does_not_store_id(sqlite_engine, monkeypatch):
     """In mock mode (send_message returns -1), don't store a fake ID."""
-    monkeypatch.setattr("leetcode_coach.flows.pinned.get_settings", lambda: type("S", (), {"telegram_chat_id": "123"})())
+    monkeypatch.setattr(
+        "leetcode_coach.flows.pinned.get_settings",
+        lambda: type("S", (), {"telegram_chat_id": "123"})(),
+    )
 
     with (
         patch.object(pinned_module, "send_message", AsyncMock(return_value=-1)),

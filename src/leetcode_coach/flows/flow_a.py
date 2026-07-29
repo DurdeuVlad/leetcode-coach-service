@@ -213,6 +213,7 @@ async def propose_5(
     *,
     llm: LLMClient | None = None,
     chat_id: str | None = None,
+    dry_run: bool = False,
 ) -> str:
     """Run the daily proposal: gather data, call LLM, parse, send to Telegram,
     then persist the 5 candidates for Flow B's pick-parse path (#020).
@@ -224,6 +225,9 @@ async def propose_5(
         llm: injected LLMClient (tests pass a mock; production uses the default).
         chat_id: override the target chat (tests use this; production uses the
             configured TELEGRAM_CHAT_ID via send_message's allowlist default).
+        dry_run: skip the Telegram send (admin/test path). Candidates are still
+            persisted so Flow B's pick-parse can run. The markdown is returned
+            either way.
 
     Flow (FR-1.6): after sending the single numbered message, the flow ENDS.
     It does not wait for the reply — replies are Flow B (#019+).
@@ -245,7 +249,8 @@ async def propose_5(
     markdown, candidates = _parse_candidates(response.text)
     _validate_candidates(candidates)
 
-    await send_message(target_chat, markdown)
+    if not dry_run:
+        await send_message(target_chat, markdown)
     # Persist the 5 candidates so Flow B's pick-parse can map reply numbers
     # → problems (issue #020). Done AFTER the send so a send failure doesn't
     # leave stale candidates; a persist failure here is loud (NFR-1 layer 2).
@@ -256,5 +261,6 @@ async def propose_5(
         model=response.model,
         tokens_in=response.tokens_in,
         tokens_out=response.tokens_out,
+        dry_run=dry_run,
     )
     return markdown

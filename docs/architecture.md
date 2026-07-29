@@ -85,14 +85,16 @@ leetcode-coach-service/
 │       ├── errors.py            # typed exceptions + global alert handler
 │       └── webhooks/
 │           ├── __init__.py
-│           └── telegram.py      # POST /telegram/webhook → flow_b.handle_update
+│           ├── telegram.py      # POST /telegram/webhook → flow_b.handle_update
+│           └── admin.py        # POST /admin/* — API-key-protected test triggers
 ├── tests/
 │   ├── conftest.py
 │   ├── test_flow_a.py
 │   ├── test_flow_b.py
 │   ├── test_expiry.py
 │   ├── test_llm_fallback.py
-│   └── test_google_auth_branch.py
+│   ├── test_google_auth_branch.py
+│   └── test_admin.py
 ├── docs/
 │   ├── business-requirements.md
 │   ├── architecture.md          # this file
@@ -108,6 +110,7 @@ leetcode-coach-service/
 ```mermaid
 flowchart LR
     TG["Telegram<br/>webhook POST"] --> APP["FastAPI app<br/>:8000"]
+    ADM["Admin API<br/>X-Admin-Api-Key"] --> APP
     SCH["APScheduler<br/>in-process"] --> APP
     APP --> DB[("Postgres<br/>Coolify")]
     APP --> LLM["OpenAI<br/>primary"]
@@ -123,9 +126,17 @@ flowchart LR
 - **One container.** APScheduler runs in-process inside the FastAPI app — no
   separate scheduler container. The app's lifespan handler starts/stops the
   scheduler on startup/shutdown.
-- **Telegram webhook** is the only inbound HTTP surface. Endpoint:
+- **Telegram webhook** is the inbound HTTP surface for user replies. Endpoint:
   `POST /telegram/webhook`. Telegram sends updates there; the handler
   dispatches to `flow_b.handle_update(update)`.
+- **Admin API** is the inbound HTTP surface for automated end-to-end testing
+  (an external AI or CI script exercising the full Flow A → Flow B pipeline
+  without Telegram). Endpoints under `POST /admin/*` require the
+  `X-Admin-Api-Key` header matching `ADMIN_API_KEY`. The router is only mounted
+  when `ADMIN_API_KEY` is non-empty (disabled by default). All admin endpoints
+  call the flow internals with `dry_run=True`: Telegram sends are skipped, but
+  DB writes and LLM calls still happen, so the test proves the real pipeline
+  works. See `docs/llm-api-reference.md` for the request/response contract.
 - **Cron jobs** are APScheduler `CronTrigger` jobs:
   - `flow_a.propose_5()` at `5 9 * * *` Europe/Bucharest.
   - `expiry.sweep_expired()` at `5 5 * * *` Europe/Bucharest.
@@ -238,6 +249,7 @@ BROWSERLESS_URL=               # homelab Browserless /function endpoint (LeetCod
 LEETCODE_USERNAME=
 TIMEZONE=Europe/Bucharest
 LOG_LEVEL=INFO
+ADMIN_API_KEY=                 # OPTIONAL — blank = admin API disabled (automated testing)
 ```
 
 Loaded via `pydantic-settings`. Missing required vars fail fast at startup

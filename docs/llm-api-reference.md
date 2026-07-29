@@ -177,3 +177,144 @@ propose vs coach by inspecting the system prompt content.
 Every call emits a structured log with `tokens_in`, `tokens_out`, and
 `model`. This feeds the NFR-2 cost budget (<$10/month). The `LLMResponse`
 dataclass carries these fields from the SDK response to the caller.
+
+---
+
+## Admin API (automated end-to-end testing)
+
+The admin API is an optional HTTP surface for an external AI or CI script
+to drive the full Flow A → Flow B pipeline without Telegram. It is mounted
+only when `ADMIN_API_KEY` is non-empty; with the env var blank the router
+is not registered and the endpoints return 404. All admin endpoints call
+the flow internals with `dry_run=True`, so Telegram sends are skipped but
+DB writes and LLM calls still happen — the test proves the real pipeline
+works end-to-end.
+
+**Base URL:** `http://<host>:8000`
+**Auth:** `X-Admin-Api-Key: <ADMIN_API_KEY>` header on every request.
+Missing or mismatched key → `401 Unauthorized`.
+
+### `POST /admin/propose`
+
+Triggers `flow_a.propose_5(dry_run=True)`: pulls the unsolved pool, asks
+the LLM for 5 candidates, and persists them as `daily_candidates` rows.
+No Telegram message is sent.
+
+**Request body:** none.
+
+**Response 200:**
+```json
+{
+  "markdown": "...the formatted proposal text...",
+  "candidates": [
+    {
+      "pick_index": 1,
+      "slug": "two-sum",
+      "title": "Two Sum",
+      "difficulty": "Easy",
+      "reasoning": "...",
+      "coaching_hint": "..."
+    },
+    ...
+  ]
+}
+```
+
+### `POST /admin/pick`
+
+Triggers `flow_b._pick_parse_path(dry_run=True)`: for each requested
+pick index, creates a Google Task and a `pending_review` row. Returns
+the created threads including `pending_review_id` for the subsequent
+`/admin/coach` call. No Telegram message is sent.
+
+**Request body:**
+```json
+{ "picks": [1, 2] }
+```
+
+`picks` is a list of 1-based indices into the 5-candidate list produced
+by `/admin/propose`. The handler joins them into the same `"1 2"` text
+string the Telegram pick path produces.
+
+**Response 200:**
+```json
+{
+  "picked": [
+    {
+      "pick_index": 1,
+      "problem_slug": "two-sum",
+      "problem_title": "Two Sum",
+      "difficulty": "Easy",
+      "message_id": 0,
+      "task_id": "...",
+      "pending_review_id": 42
+    },
+    ...
+  ]
+}
+```
+
+`message_id` is `0` under `dry_run=True` (no Telegram message was sent).
+
+### `POST /admin/coach`
+
+Triggers `flow_b._coach_pass_path(dry_run=True)` for a submission on a
+`pending_review` row: calls the coach LLM, runs the lesson decision and
+post-coach updates (DB writes + Google Task update), and returns the
+full coach result + lesson outcome as JSON. No Telegram message is sent.
+
+**Request body:**
+```json
+{
+  "code": "...the user's submission text or a status note like 'skipped'...",
+  "pending_review_id": 42,
+  "problem_slug": "two-sum"
+}
+```
+
+Either `pending_review_id` or `problem_slug` identifies the target
+`pending_review` row. If both are given, `pending_review_id` wins. When
+`problem_slug` is used, the handler looks for an `open` row with that
+slug proposed today.
+
+**Response 200:**
+```json
+{
+  "tutor_feedback": "...",
+  "lesson_title": "...",
+  "lesson_category": "...",
+  "lesson_is_recurring": false,
+  "lesson_should_graduate": false,
+  "solved": false,
+  "status": "coached",
+  "next_step": "...",
+  "time_spent_min": null,
+  "lesson_action": "reinforce",
+  "lesson_title_outcome": "...",
+  "times_reinforced": 2,
+  "reply_text": "..."
+}
+```
+
+`lesson_should_graduate` is the LLM's recommendation; graduation is
+double-gated — the DB row's `times_reinforced >= 5` is also required
+(see AGENTS.md gotcha #4). `times_reinforced` in the response is the
+post-coach DB count.
+
+**Response 404:** `{ "detail": "No open pending_review row found. Run
+/admin/propose then /admin/pick first, or provide a valid
+pending_review_id." }` if no matching row exists.
+
+### Typical automated test sequence
+
+```
+POST /admin/propose   → 200, 5 candidates persisted
+POST /admin/pick      → 200, N pending_review rows created
+POST /admin/coach     → 200, coach feedback persisted, lesson tracked
+```
+
+Each call is independent against the DB state, so the external tester
+can run them in order or retry a failed step. The `dry_run=True` flag is
+the only difference from the production path — the LLM prompts, DB
+writes, and Google Tasks calls are identical to what cron + Telegram
+would trigger.

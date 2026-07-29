@@ -126,6 +126,51 @@ async def send_reply(
     return int(data["result"]["message_id"])
 
 
+async def edit_message_text(chat_id: str, message_id: int, text: str) -> dict:
+    """Edit the text of an existing message. Returns the raw API result.
+
+    Used by the pinned progression message refresh (#039, FR-8.4). On
+    failure (message deleted, permissions changed), the caller catches
+    `TelegramError` and creates a new pinned message.
+
+    The "message is not modified" case (Telegram 400 with that exact
+    description) is NOT raised here — it surfaces as a `TelegramError` and
+    the caller (``refresh_pinned_message``) checks the error string to
+    distinguish it from a real failure.
+
+    Returns ``{"ok": True}`` in mock mode (no actual edit).
+    """
+    _enforce_allowlist(chat_id)
+    if _is_mock():
+        log.info("edit_message_text_mock", chat_id=chat_id, message_id=message_id, text=text[:200])
+        return {"ok": True}
+    payload: dict = {"chat_id": chat_id, "message_id": message_id, "text": text}
+    return await _call("editMessageText", payload)
+
+
+async def pin_message(chat_id: str, message_id: int) -> None:
+    """Pin a message in the chat. No-op in mock mode.
+
+    Used by the pinned progression message (#039). Best-effort: a failure
+    to pin is logged but does not raise (the message still exists; it's
+    just not pinned — the next refresh will try again).
+    """
+    _enforce_allowlist(chat_id)
+    if _is_mock():
+        log.info("pin_message_mock", chat_id=chat_id, message_id=message_id)
+        return
+    await _call("pinChatMessage", {"chat_id": chat_id, "message_id": message_id})
+
+
+async def unpin_message(chat_id: str, message_id: int) -> None:
+    """Unpin a message. No-op in mock mode. Best-effort (see pin_message)."""
+    _enforce_allowlist(chat_id)
+    if _is_mock():
+        log.info("unpin_message_mock", chat_id=chat_id, message_id=message_id)
+        return
+    await _call("unpinChatMessage", {"chat_id": chat_id, "message_id": message_id})
+
+
 @retry(
     stop=stop_after_attempt(3),
     wait=wait_exponential(min=2, max=10),

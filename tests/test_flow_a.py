@@ -55,6 +55,14 @@ def sqlite_session_factory(monkeypatch: pytest.MonkeyPatch):
             yield session
 
     monkeypatch.setattr(flow_a, "get_session", _get_session)
+    # #039: the pinned refresh hook (called from propose_5 when not dry_run)
+    # uses pinned_module.get_session + db.queries.get_session — patch them
+    # too so the hook doesn't hit Postgres during flow_a tests.
+    from leetcode_coach.db import queries as db_queries
+    from leetcode_coach.flows import pinned as pinned_module
+
+    monkeypatch.setattr(pinned_module, "get_session", _get_session)
+    monkeypatch.setattr(db_queries, "get_session", _get_session)
     return engine
 
 

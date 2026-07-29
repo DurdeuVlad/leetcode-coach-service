@@ -101,7 +101,13 @@ def client(admin_app) -> TestClient:
 def _insert_problems(engine):
     """Insert unsolved problems so _gather_data has a pool to choose from."""
     with Session(engine) as session:
-        for slug in ["two-sum", "merge-intervals", "binary-search", "longest-substring", "median-arrays"]:
+        for slug in [
+            "two-sum",
+            "merge-intervals",
+            "binary-search",
+            "longest-substring",
+            "median-arrays",
+        ]:
             session.add(
                 db_models.LeetCodeProblem(
                     slug=slug,
@@ -237,9 +243,7 @@ def test_propose_accepts_valid_key(client, sqlite_session_factory, monkeypatch):
 # --- POST /admin/propose -----------------------------------------------------
 
 
-def test_propose_returns_markdown_and_candidates(
-    client, sqlite_session_factory, monkeypatch
-):
+def test_propose_returns_markdown_and_candidates(client, sqlite_session_factory, monkeypatch):
     """POST /admin/propose returns the markdown + 5 candidates as JSON."""
     _insert_problems(sqlite_session_factory)
     monkeypatch.setattr(flow_a, "LLMClient", lambda: _mock_llm_propose())
@@ -253,9 +257,7 @@ def test_propose_returns_markdown_and_candidates(
     assert body["candidates"][0]["pick_index"] == 1
 
 
-def test_propose_persists_candidates_to_db(
-    client, sqlite_session_factory, monkeypatch
-):
+def test_propose_persists_candidates_to_db(client, sqlite_session_factory, monkeypatch):
     """The 5 candidates are persisted to daily_candidates (Flow B can read them)."""
     _insert_problems(sqlite_session_factory)
     monkeypatch.setattr(flow_a, "LLMClient", lambda: _mock_llm_propose())
@@ -276,9 +278,7 @@ def test_propose_persists_candidates_to_db(
 # --- POST /admin/pick --------------------------------------------------------
 
 
-def test_pick_creates_pending_review_rows(
-    client, sqlite_session_factory, monkeypatch
-):
+def test_pick_creates_pending_review_rows(client, sqlite_session_factory, monkeypatch):
     """POST /admin/pick creates pending_review rows + Google Tasks, returns threads."""
     _insert_problems(sqlite_session_factory)
     monkeypatch.setattr(flow_a, "LLMClient", lambda: _mock_llm_propose())
@@ -309,9 +309,7 @@ def test_pick_creates_pending_review_rows(
     assert rows[0].status == "open"
 
 
-def test_pick_empty_returns_empty_list(
-    client, sqlite_session_factory, monkeypatch
-):
+def test_pick_empty_returns_empty_list(client, sqlite_session_factory, monkeypatch):
     """POST /admin/pick with no valid picks → empty list (not an error)."""
     _insert_problems(sqlite_session_factory)
     monkeypatch.setattr(flow_a, "LLMClient", lambda: _mock_llm_propose())
@@ -330,9 +328,7 @@ def test_pick_empty_returns_empty_list(
 # --- POST /admin/coach -------------------------------------------------------
 
 
-def test_coach_returns_feedback_and_lesson(
-    client, sqlite_session_factory, monkeypatch
-):
+def test_coach_returns_feedback_and_lesson(client, sqlite_session_factory, monkeypatch):
     """POST /admin/coach runs the coach pass and returns the full result."""
     _insert_problems(sqlite_session_factory)
     monkeypatch.setattr(flow_a, "LLMClient", lambda: _mock_llm_propose())
@@ -371,9 +367,7 @@ def test_coach_returns_feedback_and_lesson(
     assert "hash map lookup" in body["reply_text"]
 
 
-def test_coach_404_on_missing_pending_review(
-    client, sqlite_session_factory, monkeypatch
-):
+def test_coach_404_on_missing_pending_review(client, sqlite_session_factory, monkeypatch):
     """POST /admin/coach with a non-existent pending_review_id → 404."""
     monkeypatch.setattr(flow_b, "LLMClient", lambda: _mock_llm_coach())
     with patch.object(flow_b, "mark_complete", AsyncMock()):
@@ -385,9 +379,7 @@ def test_coach_404_on_missing_pending_review(
     assert resp.status_code == 404
 
 
-def test_coach_by_problem_slug(
-    client, sqlite_session_factory, monkeypatch
-):
+def test_coach_by_problem_slug(client, sqlite_session_factory, monkeypatch):
     """POST /admin/coach can find the pending_review by problem_slug."""
     _insert_problems(sqlite_session_factory)
     monkeypatch.setattr(flow_a, "LLMClient", lambda: _mock_llm_propose())
@@ -415,9 +407,7 @@ def test_coach_by_problem_slug(
 # --- Full pipeline test ------------------------------------------------------
 
 
-def test_full_pipeline_propose_pick_coach(
-    client, sqlite_session_factory, monkeypatch
-):
+def test_full_pipeline_propose_pick_coach(client, sqlite_session_factory, monkeypatch):
     """Full end-to-end: propose → pick → coach, all via HTTP, no Telegram."""
     _insert_problems(sqlite_session_factory)
     monkeypatch.setattr(flow_a, "LLMClient", lambda: _mock_llm_propose())

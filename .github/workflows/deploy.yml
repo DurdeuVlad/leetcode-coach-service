@@ -1,0 +1,19 @@
+name: Deploy to Coolify
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Trigger Coolify Auto-Deploy
+    runs-on: self-hosted
+    steps:
+      - name: Trigger Coolify Deployment
+        run: |
+          echo "Triggering Coolify deployment for commit ${{ github.sha }}..."
+          docker exec coolify php artisan tinker --execute="\$app = App\Models\Application::find(1); queue_application_deployment(application: \$app, deployment_uuid: (string)Illuminate\Support\Str::uuid(), commit: '${{ github.sha }}');"

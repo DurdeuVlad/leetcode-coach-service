@@ -83,6 +83,13 @@ app = FastAPI(title="LeetCode Coach", version="0.1.0", lifespan=lifespan)
 # Inbound Telegram webhook (#019) — the single inbound HTTP surface.
 app.include_router(telegram_router)
 
+# Admin API — only mounted when ADMIN_API_KEY is set (disabled by default).
+# Used for automated end-to-end testing via HTTP (Flow A → pick → coach).
+if get_settings().admin_api_key:
+    from leetcode_coach.webhooks.admin import router as admin_router
+
+    app.include_router(admin_router)
+
 
 @app.get("/health")
 async def health(response: Response) -> dict[str, str]:

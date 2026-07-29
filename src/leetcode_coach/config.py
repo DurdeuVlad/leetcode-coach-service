@@ -77,6 +77,13 @@ class Settings(BaseSettings):
     # LeetCode
     leetcode_username: str = Field(...)
 
+    # Admin API — shared secret for the /admin/* test/trigger endpoints.
+    # Empty = admin endpoints disabled (returns 404). Set to a random string
+    # to enable automated end-to-end testing via HTTP.
+    admin_api_key: str = Field(
+        "", description="Shared secret for /admin/* endpoints — blank disables admin API"
+    )
+
     # Runtime
     timezone: str = Field("Europe/Bucharest")
     log_level: str = Field("INFO")

@@ -242,7 +242,9 @@ def _fuzzy_title_match(text: str, rows: list[PendingReview]) -> list[PendingRevi
 # ===========================================================================
 
 
-async def _pick_parse_path(chat_id: str, text: str) -> None:
+async def _pick_parse_path(
+    chat_id: str, text: str, *, dry_run: bool = False
+) -> list[dict]:
     """Parse a pick-list reply (e.g. '2 5') into ≤2 chosen problems, then
     create per-problem threads, Google Tasks, and pending_review rows.
 
@@ -254,14 +256,19 @@ async def _pick_parse_path(chat_id: str, text: str) -> None:
     1. Send per-problem Telegram message (incl. coaching_hint); capture message_id.
     2. Create Google Task (title, notes, due=next day); capture task_id.
     3. Insert pending_review row (message_id, google_task_id, slug, title, today, open).
+
+    When ``dry_run`` is True, Telegram sends are skipped (message_id = -1) but
+    Google Tasks and pending_review rows are still created. Returns a list of
+    dicts describing each created thread (empty in the non-dry-run path).
     """
     # FR-2.3: regex parse, cap at MAX_PICKS.
     nums = [int(n) for n in re.findall(r"\d+", text)]
     nums = [n for n in nums if 1 <= n <= 5][:MAX_PICKS]
     if not nums:
-        await send_message(chat_id, "No valid picks. Reply with up to 2 numbers, e.g. '2 5'.")
-        log.info("flow_b_pick_parse_empty", text=text[:100])
-        return
+        if not dry_run:
+            await send_message(chat_id, "No valid picks. Reply with up to 2 numbers, e.g. '2 5'.")
+        log.info("flow_b_pick_parse_empty", text=text[:100], dry_run=dry_run)
+        return []
 
     today = datetime.date.today()
     with next(get_session()) as session:
@@ -274,9 +281,10 @@ async def _pick_parse_path(chat_id: str, text: str) -> None:
     if not candidates:
         # No 5-list was persisted today (Flow A didn't run, or #020 failed).
         # Fail loud — this is a state error, not user error.
-        await send_message(chat_id, "No candidate list today. Run /propose first.")
-        log.warning("flow_b_pick_parse_no_candidates", date=today.isoformat())
-        return
+        if not dry_run:
+            await send_message(chat_id, "No candidate list today. Run /propose first.")
+        log.warning("flow_b_pick_parse_no_candidates", date=today.isoformat(), dry_run=dry_run)
+        return []
 
     chosen: list[DailyCandidate] = []
     for n in nums:
@@ -287,14 +295,16 @@ async def _pick_parse_path(chat_id: str, text: str) -> None:
                 break
 
     if not chosen:
-        await send_message(chat_id, "No valid picks. Reply with up to 2 numbers, e.g. '2 5'.")
-        log.info("flow_b_pick_parse_no_match", nums=nums)
-        return
+        if not dry_run:
+            await send_message(chat_id, "No valid picks. Reply with up to 2 numbers, e.g. '2 5'.")
+        log.info("flow_b_pick_parse_no_match", nums=nums, dry_run=dry_run)
+        return []
 
-    log.info("flow_b_pick_parse_chosen", count=len(chosen), indices=nums)
+    log.info("flow_b_pick_parse_chosen", count=len(chosen), indices=nums, dry_run=dry_run)
 
     # FR-2.4: per-pick side effects, in order.
     due_date = (today + datetime.timedelta(days=1)).isoformat()
+    created_threads: list[dict] = []
     for i, c in enumerate(chosen, start=1):
         # Step 1: send per-problem message, capture message_id.
         per_problem_text = (
@@ -302,7 +312,10 @@ async def _pick_parse_path(chat_id: str, text: str) -> None:
             f"{c.coaching_hint}\n\n"
             f"Send your code as a reply to this message."
         )
-        message_id = await send_message(chat_id, per_problem_text)
+        if dry_run:
+            message_id = -1
+        else:
+            message_id = await send_message(chat_id, per_problem_text)
 
         # Step 2: create Google Task, capture task_id.
         notes = f"slug: {c.slug}\nreasoning: {c.reasoning}\nhint: {c.coaching_hint}"
@@ -310,23 +323,37 @@ async def _pick_parse_path(chat_id: str, text: str) -> None:
 
         # Step 3: insert pending_review row.
         with next(get_session()) as session:
-            session.add(
-                PendingReview(
-                    message_id=message_id,
-                    google_task_id=task_id,
-                    problem_slug=c.slug,
-                    problem_title=c.title,
-                    proposed_at=today,
-                    status="open",
-                )
+            review = PendingReview(
+                message_id=message_id,
+                google_task_id=task_id,
+                problem_slug=c.slug,
+                problem_title=c.title,
+                proposed_at=today,
+                status="open",
             )
+            session.add(review)
             session.commit()
+            session.refresh(review)
+            pending_review_id = review.id
         log.info(
             "flow_b_pick_parse_created",
             problem_slug=c.slug,
             message_id=message_id,
             task_id=task_id,
+            dry_run=dry_run,
         )
+        created_threads.append(
+            {
+                "pick_index": c.pick_index,
+                "problem_slug": c.slug,
+                "problem_title": c.title,
+                "difficulty": c.difficulty,
+                "message_id": message_id,
+                "task_id": task_id,
+                "pending_review_id": pending_review_id,
+            }
+        )
+    return created_threads
 
 
 # ===========================================================================
@@ -339,12 +366,19 @@ async def _coach_pass_path(
     inbound_message_id: int,
     review: PendingReview,
     user_text: str,
-) -> None:
+    *,
+    dry_run: bool = False,
+) -> tuple[CoachResult, LessonOutcome, str]:
     """Run the coach LLM call for a submission, parse the response, then run
     the lesson decision (#025) and post-coach updates (#026).
 
     `review` is the matched `pending_review` row. `inbound_message_id` is
     the user's inbound message id — we reply to it (#026 step 5).
+
+    When ``dry_run`` is True, the Telegram reply is skipped but all DB writes
+    and the Google Task update still happen. Returns a tuple of
+    ``(CoachResult, LessonOutcome, reply_text)`` so callers (admin API, tests)
+    can inspect the full output without scraping Telegram.
     """
     # Gather inputs: problem metadata + active lessons.
     with next(get_session()) as session:
@@ -376,6 +410,7 @@ async def _coach_pass_path(
         problem_slug=review.problem_slug,
         is_status_note=any(k in user_text.lower() for k in _STATUS_KEYWORDS),
         active_lessons_count=len(active_lessons),
+        dry_run=dry_run,
     )
 
     client = LLMClient()
@@ -392,14 +427,16 @@ async def _coach_pass_path(
     lesson_outcome = _lesson_decision(result, active_lessons)
 
     # #026 — post-coach updates (5 ordered steps + BUG-2 notes append).
-    await _post_coach_updates(
+    reply_text = await _post_coach_updates(
         chat_id=chat_id,
         inbound_message_id=inbound_message_id,
         review=review,
         problem_slug=review.problem_slug,
         result=result,
         lesson_outcome=lesson_outcome,
+        dry_run=dry_run,
     )
+    return result, lesson_outcome, reply_text
 
 
 def _parse_coach_result(data: dict) -> CoachResult:
@@ -563,7 +600,8 @@ async def _post_coach_updates(
     problem_slug: str,
     result: CoachResult,
     lesson_outcome: LessonOutcome,
-) -> None:
+    dry_run: bool = False,
+) -> str:
     """Apply the five ordered side effects after a coach pass (FR-2.7).
 
     1. Insert leetcode_log row (full schema, incl. lesson_title if fired).
@@ -572,6 +610,10 @@ async def _post_coach_updates(
     4. Update pending_review.status = done.
     5. Telegram reply: short confirmation + coach feedback, naming the
        lesson outcome.
+
+    When ``dry_run`` is True, step 5 (Telegram reply) is skipped but all DB
+    writes and the Google Task update still happen. Returns the reply text
+    that would have been sent (useful for admin API / tests).
 
     `GoogleAuthExpiredError` from step 3 is re-raised (the webhook's global
     catch routes it to the distinct #008 alert — it's already a typed error).
@@ -619,14 +661,17 @@ async def _post_coach_updates(
     # lesson outcome (saved / reinforced / retired).
     footer = _lesson_footer(lesson_outcome)
     reply_text = f"{result.tutor_feedback}\n\n{footer}" if footer else result.tutor_feedback
-    await send_reply(chat_id, inbound_message_id, reply_text)
+    if not dry_run:
+        await send_reply(chat_id, inbound_message_id, reply_text)
 
     log.info(
         "flow_b_post_coach_done",
         problem_slug=problem_slug,
         status=result.status,
         lesson_action=lesson_outcome.action,
+        dry_run=dry_run,
     )
+    return reply_text
 
 
 def _lesson_footer(outcome: LessonOutcome) -> str:

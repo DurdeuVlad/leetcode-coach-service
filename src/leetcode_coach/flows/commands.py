@@ -193,9 +193,7 @@ async def _cmd_coach(update: Update, args: str) -> None:
     tokens = args.split(maxsplit=1)
     if tokens:
         first_token = tokens[0]
-        slug_match = next(
-            (r for r in open_reviews if r.problem_slug == first_token), None
-        )
+        slug_match = next((r for r in open_reviews if r.problem_slug == first_token), None)
         if slug_match is not None:
             submission = tokens[1] if len(tokens) > 1 else ""
             await flow_b._coach_pass_path(
@@ -213,16 +211,15 @@ async def _cmd_coach(update: Update, args: str) -> None:
         lines = [f"- {r.problem_title} ({r.problem_slug})" for r in open_reviews]
         await send_message(
             chat_id,
-            "Which problem? Open today:\n" + "\n".join(lines)
+            "Which problem? Open today:\n"
+            + "\n".join(lines)
             + "\n\nUse /coach <slug> <code>, or reply to a problem's message.",
         )
         log.info("coach_ambiguous", open_count=len(open_reviews))
         return
 
     review = open_reviews[0]
-    await flow_b._coach_pass_path(
-        chat_id, inbound_id, review, user_text=args, dry_run=False
-    )
+    await flow_b._coach_pass_path(chat_id, inbound_id, review, user_text=args, dry_run=False)
     log.info("coach_via_single_open", problem_slug=review.problem_slug)
 
 

@@ -164,6 +164,15 @@ async def admin_propose(
         for r in rows
     ]
     log.info("admin_propose_done", candidate_count=len(candidates))
+
+    # FR-8.2: refresh pinned message after admin-driven Flow A.
+    try:
+        from leetcode_coach.flows.pinned import refresh_pinned_message
+
+        await refresh_pinned_message()
+    except Exception:
+        log.warning("pinned_refresh_failed_admin_propose")
+
     return ProposeResponse(markdown=markdown, candidates=candidates)
 
 
@@ -200,6 +209,15 @@ async def admin_pick(
         for t in created
     ]
     log.info("admin_pick_done", picked_count=len(picked))
+
+    # FR-8.2: refresh pinned message after admin-driven pick.
+    try:
+        from leetcode_coach.flows.pinned import refresh_pinned_message
+
+        await refresh_pinned_message()
+    except Exception:
+        log.warning("pinned_refresh_failed_admin_pick")
+
     return PickResponse(picked=picked)
 
 
@@ -261,6 +279,15 @@ async def admin_coach(
         status=result.status,
         lesson_action=lesson_outcome.action,
     )
+
+    # FR-8.2: refresh pinned message after admin-driven coach pass.
+    try:
+        from leetcode_coach.flows.pinned import refresh_pinned_message
+
+        await refresh_pinned_message()
+    except Exception:
+        log.warning("pinned_refresh_failed_admin_coach")
+
     return CoachResponse(
         tutor_feedback=result.tutor_feedback,
         lesson_title=result.lesson_title,

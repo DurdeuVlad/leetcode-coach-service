@@ -14,11 +14,12 @@ Architecture refs:
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 import structlog
-from fastapi import FastAPI, Response
+from fastapi import FastAPI, Request, Response
 from sqlalchemy import text
 
 from leetcode_coach.config import get_settings
@@ -55,9 +56,42 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
     _configure_logging(settings.log_level)
     log = structlog.get_logger("lifespan")
+
+    # Startup diagnostics — one structured block so the operator can see at
+    # a glance which integrations are live vs mock/disabled. This is the
+    # single place to look when "the bot doesn't respond": each line says
+    # whether the corresponding inbound/outbound path is wired.
+    db_ok = True
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+    except Exception as e:
+        db_ok = False
+        log.error("startup_db_unreachable", error=str(e))
+
     log.info(
-        "startup", timezone=settings.timezone, webhook_url=settings.telegram_webhook_url or None
+        "startup",
+        timezone=settings.timezone,
+        db="reachable" if db_ok else "unreachable",
+        telegram_bot_token="set" if settings.telegram_bot_token else "empty",
+        telegram_chat_id=settings.telegram_chat_id,
+        webhook_url=settings.telegram_webhook_url or None,
+        webhook_secret="set" if settings.telegram_webhook_secret else "empty",
+        openai_api_key="set" if settings.openai_api_key else "empty",
+        openai_mock_mode=settings.openai_api_key.lower() == "mock",
+        gemini_api_key="set" if settings.gemini_api_key else "empty",
+        google_tasks_enabled=bool(
+            settings.google_client_id
+            and settings.google_client_secret
+            and settings.google_refresh_token
+        ),
+        admin_api_enabled=bool(settings.admin_api_key),
+        browserless_url=settings.browserless_url or None,
+        searxng_url=settings.searxng_url or None,
+        leetcode_username=settings.leetcode_username,
+        log_level=settings.log_level,
     )
+
     start_scheduler()
 
     # Register the Telegram webhook if a public URL is configured (#030).
@@ -69,7 +103,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         except Exception as e:
             log.error("webhook_registration_failed", error=str(e))
     else:
-        log.info("webhook_skipped", reason="TELEGRAM_WEBHOOK_URL not set")
+        log.warning(
+            "webhook_skipped",
+            reason="TELEGRAM_WEBHOOK_URL not set — bot will NOT receive Telegram updates",
+        )
 
     try:
         yield
@@ -89,6 +126,43 @@ if get_settings().admin_api_key:
     from leetcode_coach.webhooks.admin import router as admin_router
 
     app.include_router(admin_router)
+
+
+# HTTP request/response logging middleware — logs every inbound request with
+# method, path, status, and duration. This is the missing piece for runtime
+# observability: without it, a webhook hit that 500s or an admin call that
+# hangs leaves no trace in the logs. Health checks are excluded to avoid
+# spam (Coolify pings /health frequently).
+_access_log = structlog.get_logger("http")
+
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):  # type: ignore[no-untyped-def]
+    """Log every HTTP request with method, path, status, duration_ms.
+
+    Skips ``/health`` to avoid log spam from Coolify's health probe.
+    """
+    if request.url.path == "/health":
+        return await call_next(request)
+    start = time.monotonic()
+    status_code: int | None = None
+    try:
+        response = await call_next(request)
+        status_code = response.status_code
+        return response
+    except Exception:
+        status_code = 500
+        raise
+    finally:
+        duration_ms = int((time.monotonic() - start) * 1000)
+        _access_log.info(
+            "request",
+            method=request.method,
+            path=request.url.path,
+            status=status_code,
+            duration_ms=duration_ms,
+            client=request.client.host if request.client else None,
+        )
 
 
 @app.get("/health")

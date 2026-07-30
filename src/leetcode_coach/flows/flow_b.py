@@ -26,6 +26,7 @@ append, never replace.
 from __future__ import annotations
 
 import datetime
+import html
 import json
 import re
 from dataclasses import dataclass
@@ -318,15 +319,18 @@ async def _pick_parse_path(chat_id: str, text: str, *, dry_run: bool = False) ->
     created_threads: list[dict] = []
     for i, c in enumerate(chosen, start=1):
         # Step 1: send per-problem message, capture message_id.
+        # HTML-escape interpolated fields: titles/hints may contain `<`, `>`,
+        # `&` which would otherwise break Telegram's HTML parser.
         per_problem_text = (
-            f"*Problem {i}/{len(chosen)}: {c.title}* ({c.difficulty})\n\n"
-            f"{c.coaching_hint}\n\n"
+            f"<b>Problem {i}/{len(chosen)}: {html.escape(c.title)}</b> "
+            f"({html.escape(c.difficulty)})\n\n"
+            f"{html.escape(c.coaching_hint)}\n\n"
             f"Send your code as a reply to this message."
         )
         if dry_run:
             message_id = -1
         else:
-            message_id = await send_message(chat_id, per_problem_text)
+            message_id = await send_message(chat_id, per_problem_text, parse_mode="HTML")
 
         # Step 2: create Google Task, capture task_id.
         notes = f"slug: {c.slug}\nreasoning: {c.reasoning}\nhint: {c.coaching_hint}"
@@ -684,7 +688,7 @@ async def _post_coach_updates(
     footer = _lesson_footer(lesson_outcome)
     reply_text = f"{result.tutor_feedback}\n\n{footer}" if footer else result.tutor_feedback
     if not dry_run:
-        await send_reply(chat_id, inbound_message_id, reply_text)
+        await send_reply(chat_id, inbound_message_id, reply_text, parse_mode="HTML")
 
     log.info(
         "flow_b_post_coach_done",
@@ -719,9 +723,15 @@ def _lesson_footer(outcome: LessonOutcome) -> str:
     if outcome.action == "none":
         return ""
     if outcome.action == "saved":
-        return f"Saved lesson: <b>{outcome.title}</b>."
+        return f"Saved lesson: <b>{html.escape(outcome.title)}</b>."
     if outcome.action == "reinforced":
-        return f"Reinforcing lesson: <b>{outcome.title}</b> ({outcome.times_reinforced}th time)."
+        return (
+            f"Reinforcing lesson: <b>{html.escape(outcome.title)}</b> "
+            f"({outcome.times_reinforced}th time)."
+        )
     if outcome.action == "retired":
-        return f"Retiring lesson: <b>{outcome.title}</b> — demonstrated consistently."
+        return (
+            f"Retiring lesson: <b>{html.escape(outcome.title)}</b> "
+            f"— demonstrated consistently."
+        )
     return ""

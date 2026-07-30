@@ -250,7 +250,7 @@ async def propose_5(
     _validate_candidates(candidates)
 
     if not dry_run:
-        await send_message(target_chat, markdown)
+        await send_message(target_chat, markdown, parse_mode="MarkdownV2")
     # Persist the 5 candidates so Flow B's pick-parse can map reply numbers
     # → problems (issue #020). Done AFTER the send so a send failure doesn't
     # leave stale candidates; a persist failure here is loud (NFR-1 layer 2).

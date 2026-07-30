@@ -319,14 +319,14 @@ async def _pick_parse_path(chat_id: str, text: str, *, dry_run: bool = False) ->
     for i, c in enumerate(chosen, start=1):
         # Step 1: send per-problem message, capture message_id.
         per_problem_text = (
-            f"*Problem {i}/{len(chosen)}: {c.title}* ({c.difficulty})\n\n"
+            f"<b>Problem {i}/{len(chosen)}: {c.title}</b> ({c.difficulty})\n\n"
             f"{c.coaching_hint}\n\n"
             f"Send your code as a reply to this message."
         )
         if dry_run:
             message_id = -1
         else:
-            message_id = await send_message(chat_id, per_problem_text)
+            message_id = await send_message(chat_id, per_problem_text, parse_mode="HTML")
 
         # Step 2: create Google Task, capture task_id.
         notes = f"slug: {c.slug}\nreasoning: {c.reasoning}\nhint: {c.coaching_hint}"
@@ -684,7 +684,7 @@ async def _post_coach_updates(
     footer = _lesson_footer(lesson_outcome)
     reply_text = f"{result.tutor_feedback}\n\n{footer}" if footer else result.tutor_feedback
     if not dry_run:
-        await send_reply(chat_id, inbound_message_id, reply_text)
+        await send_reply(chat_id, inbound_message_id, reply_text, parse_mode="HTML")
 
     log.info(
         "flow_b_post_coach_done",

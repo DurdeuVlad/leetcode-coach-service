@@ -334,7 +334,7 @@ async def test_pick_parse_two_picks_creates_two_threads(sqlite_session_factory):
     sent_msgs = []
     created_tasks = []
 
-    async def _fake_send(chat_id, text):
+    async def _fake_send(chat_id, text, **kwargs):
         mid = next(msg_ids)
         sent_msgs.append((mid, text))
         return mid
@@ -373,7 +373,7 @@ async def test_pick_parse_caps_at_two(sqlite_session_factory):
     _insert_daily_candidates(sqlite_session_factory, count=5)
     sent = []
 
-    async def _fake_send(chat_id, text):
+    async def _fake_send(chat_id, text, **kwargs):
         mid = len(sent) + 1
         sent.append(text)
         return mid
@@ -461,7 +461,7 @@ async def test_coach_path_runs_five_steps_in_order(sqlite_session_factory):
 
     sent_replies = []
 
-    async def _spy_send_reply(chat_id, reply_to, text):
+    async def _spy_send_reply(chat_id, reply_to, text, **kwargs):
         call_order.append("reply")
         sent_replies.append(text)
 

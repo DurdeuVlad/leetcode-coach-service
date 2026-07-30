@@ -36,17 +36,20 @@
 | # | Decision | Alternatives | Rationale |
 |---|----------|-------------|-----------|
 | 10 | Credit/debit ledger | Fixed queue; streak target | Pure balance, most flexible, no hard "due" concept |
-| 11 | Daily tax -2, hard=+2, medium=+1, easy=+0.5 (solved) | Flat rate | Difficulty-weighted rewards real effort |
-| 12 | Full scale: skip=0, saw_solution=0.25, reviewed=0.5, solved=full | All zero; partial only | Rewards every level of engagement |
+| 11 | Daily tax -2, hard=+2, medium=+1, easy=+0.5 (solved) | Flat rate | Difficulty-weighted rewards real effort. **Provisional defaults — pending Phase 7 calibration with real runtime data (see `business-requirements.md` §8). Not fixed decisions.** |
+| 12 | Full scale: skip=0, saw_solution=0.25, reviewed=0.5, solved=full | All zero; partial only | Rewards every level of engagement. **Provisional — pending Phase 7 calibration.** |
 | 13 | Balance = cumulative credits - (days × 2) | — | Positive = ahead, negative = behind |
-| 14 | Propose refills when open queue < threshold | Scheduled only; on-demand only | Auto-refill ensures queue never empties |
-| 15 | Nudge at 20:00 if balance < 0 | No nudge; nudge at different time | Gentle evening reminder, not aggressive |
+| 14 | Propose refills when open queue < threshold | Scheduled only; on-demand only | Auto-refill ensures queue never empties. **Threshold (3) is provisional — pending Phase 7 calibration.** |
+| 15 | Nudge at 20:00 if balance < 0 | No nudge; nudge at different time | Gentle evening reminder, not aggressive. **Time (20:00) is provisional — pending Phase 7 calibration.** |
 | 16 | Expiry at 22:00 with [Extend to Tomorrow] button | 05:05 next day; no expiry | User-controlled; problems stay in queue regardless |
 
 ## Assumptions
 
 - Daily tax accrues at 00:00 Europe/Bucharest (clean day boundary).
 - Queue refill threshold: propose when <3 open (uncoached) problems in queue.
+  **All numeric values in this section are provisional defaults pending Phase 7
+  calibration (see `business-requirements.md` §8). They are starting points for
+  implementation, not final tuning decisions.**
 - The 09:05 cron becomes a "morning check" — if queue is low, propose; if not, skip.
 - Existing `/propose`, `/pick`, `/coach` text commands remain as fallbacks.
 - `leetcode_log` gets a `credits_earned` column (nullable float, backfilled as 0
@@ -121,8 +124,8 @@ callback_query handler
 **callback_data ≤64 bytes mitigation:** `callback_data` is capped at 64
 bytes by Telegram. `action:slug` where action is up to 11 chars
 (`why_lesson`) + `:` + slug. LeetCode slugs can be up to 200 chars (per
-the `LeetCodeProblem.slug` model), so `why_lesson:` + 200-char slug = 212
-bytes — far over the limit. The `encode_callback_data(action, slug)`
+the `LeetCodeProblem.slug` model), so `why_lesson:` (11 chars) + 200-char
+slug = 211 bytes — far over the limit. The `encode_callback_data(action, slug)`
 helper (built in #043) handles this: if `len(action) + 1 + len(slug) <=
 64`, it returns `f"{action}:{slug}"` directly; otherwise it computes
 `md5(slug)[:8]`, stores a `callback_hash:{hash} → slug` mapping in

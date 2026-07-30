@@ -334,7 +334,7 @@ async def test_status_shows_lessons_log_and_streak(sqlite_session_factory):
     update = _make_update(text="/status")
     sent = []
 
-    async def _fake_send(chat_id, text):
+    async def _fake_send(chat_id, text, **kwargs):
         sent.append(text)
 
     with (
@@ -368,7 +368,7 @@ async def test_status_streak_zero_when_no_coached(sqlite_session_factory):
     update = _make_update(text="/status")
     sent = []
 
-    async def _fake_send(chat_id, text):
+    async def _fake_send(chat_id, text, **kwargs):
         sent.append(text)
 
     with (
@@ -391,7 +391,7 @@ async def test_why_no_args_replies_usage(sqlite_session_factory):
     update = _make_update(text="/why")
     sent = []
 
-    async def _fake_send(chat_id, text):
+    async def _fake_send(chat_id, text, **kwargs):
         sent.append(text)
 
     with (
@@ -413,7 +413,7 @@ async def test_why_bad_slug_replies_no_such_problem(sqlite_session_factory):
     update = _make_update(text="/why nonexistent-slug")
     sent = []
 
-    async def _fake_send(chat_id, text):
+    async def _fake_send(chat_id, text, **kwargs):
         sent.append(text)
 
     with (
@@ -436,7 +436,7 @@ async def test_why_valid_slug_makes_one_llm_call(sqlite_session_factory):
     update = _make_update(text="/why two-sum")
     sent = []
 
-    async def _fake_send(chat_id, text):
+    async def _fake_send(chat_id, text, **kwargs):
         sent.append(text)
 
     mock_response = AsyncMock()
@@ -684,7 +684,7 @@ async def test_coach_two_open_reviews_no_slug_replies_with_list(sqlite_session_f
 
     sent = []
 
-    async def _fake_send(chat_id, text):
+    async def _fake_send(chat_id, text, **kwargs):
         sent.append(text)
 
     with (
@@ -708,7 +708,7 @@ async def test_coach_zero_open_reviews_replies_no_open_problems(sqlite_session_f
 
     sent = []
 
-    async def _fake_send(chat_id, text):
+    async def _fake_send(chat_id, text, **kwargs):
         sent.append(text)
 
     with (
@@ -757,7 +757,7 @@ async def test_coach_reply_to_non_problem_message_replies_error(sqlite_session_f
 
     sent = []
 
-    async def _fake_send(chat_id, text):
+    async def _fake_send(chat_id, text, **kwargs):
         sent.append(text)
 
     with (

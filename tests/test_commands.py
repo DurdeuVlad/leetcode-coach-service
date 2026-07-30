@@ -335,6 +335,11 @@ async def test_status_shows_lessons_log_and_streak(sqlite_session_factory):
     sent = []
 
     async def _fake_send(chat_id, text, **kwargs):
+        # Slash-command replies are plain text (no parse_mode). Guard against
+        # accidentally leaking HTML/MarkdownV2 into command responses.
+        assert kwargs.get("parse_mode") is None, (
+            f"command reply must be plain text, got parse_mode={kwargs.get('parse_mode')!r}"
+        )
         sent.append(text)
 
     with (
@@ -369,6 +374,11 @@ async def test_status_streak_zero_when_no_coached(sqlite_session_factory):
     sent = []
 
     async def _fake_send(chat_id, text, **kwargs):
+        # Slash-command replies are plain text (no parse_mode). Guard against
+        # accidentally leaking HTML/MarkdownV2 into command responses.
+        assert kwargs.get("parse_mode") is None, (
+            f"command reply must be plain text, got parse_mode={kwargs.get('parse_mode')!r}"
+        )
         sent.append(text)
 
     with (
@@ -392,6 +402,11 @@ async def test_why_no_args_replies_usage(sqlite_session_factory):
     sent = []
 
     async def _fake_send(chat_id, text, **kwargs):
+        # Slash-command replies are plain text (no parse_mode). Guard against
+        # accidentally leaking HTML/MarkdownV2 into command responses.
+        assert kwargs.get("parse_mode") is None, (
+            f"command reply must be plain text, got parse_mode={kwargs.get('parse_mode')!r}"
+        )
         sent.append(text)
 
     with (
@@ -414,6 +429,11 @@ async def test_why_bad_slug_replies_no_such_problem(sqlite_session_factory):
     sent = []
 
     async def _fake_send(chat_id, text, **kwargs):
+        # Slash-command replies are plain text (no parse_mode). Guard against
+        # accidentally leaking HTML/MarkdownV2 into command responses.
+        assert kwargs.get("parse_mode") is None, (
+            f"command reply must be plain text, got parse_mode={kwargs.get('parse_mode')!r}"
+        )
         sent.append(text)
 
     with (
@@ -437,6 +457,11 @@ async def test_why_valid_slug_makes_one_llm_call(sqlite_session_factory):
     sent = []
 
     async def _fake_send(chat_id, text, **kwargs):
+        # Slash-command replies are plain text (no parse_mode). Guard against
+        # accidentally leaking HTML/MarkdownV2 into command responses.
+        assert kwargs.get("parse_mode") is None, (
+            f"command reply must be plain text, got parse_mode={kwargs.get('parse_mode')!r}"
+        )
         sent.append(text)
 
     mock_response = AsyncMock()
@@ -685,6 +710,11 @@ async def test_coach_two_open_reviews_no_slug_replies_with_list(sqlite_session_f
     sent = []
 
     async def _fake_send(chat_id, text, **kwargs):
+        # Slash-command replies are plain text (no parse_mode). Guard against
+        # accidentally leaking HTML/MarkdownV2 into command responses.
+        assert kwargs.get("parse_mode") is None, (
+            f"command reply must be plain text, got parse_mode={kwargs.get('parse_mode')!r}"
+        )
         sent.append(text)
 
     with (
@@ -709,6 +739,11 @@ async def test_coach_zero_open_reviews_replies_no_open_problems(sqlite_session_f
     sent = []
 
     async def _fake_send(chat_id, text, **kwargs):
+        # Slash-command replies are plain text (no parse_mode). Guard against
+        # accidentally leaking HTML/MarkdownV2 into command responses.
+        assert kwargs.get("parse_mode") is None, (
+            f"command reply must be plain text, got parse_mode={kwargs.get('parse_mode')!r}"
+        )
         sent.append(text)
 
     with (
@@ -758,6 +793,11 @@ async def test_coach_reply_to_non_problem_message_replies_error(sqlite_session_f
     sent = []
 
     async def _fake_send(chat_id, text, **kwargs):
+        # Slash-command replies are plain text (no parse_mode). Guard against
+        # accidentally leaking HTML/MarkdownV2 into command responses.
+        assert kwargs.get("parse_mode") is None, (
+            f"command reply must be plain text, got parse_mode={kwargs.get('parse_mode')!r}"
+        )
         sent.append(text)
 
     with (

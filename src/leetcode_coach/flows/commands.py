@@ -19,6 +19,7 @@ Commands (FR-6.1 - 6.6):
 - ``/coach <text>`` → #037 (target resolution + ``_coach_pass_path``).
 - ``/status`` → #038 (read-only DB dump, no LLM).
 - ``/why <slug>`` → #038 (single bounded LLM call).
+- ``/help`` → static command list, no LLM, no DB write.
 - unknown ``/foo`` → short "unknown command" reply, no LLM, no DB write
   (FR-6.6).
 
@@ -49,7 +50,7 @@ log = structlog.get_logger("commands")
 
 # Known command names. The dispatch table maps each to a handler coroutine.
 # /status and /why are stubbed here and fleshed out in #038.
-_KNOWN_COMMANDS = ("propose", "pick", "coach", "status", "why")
+_KNOWN_COMMANDS = ("propose", "pick", "coach", "status", "why", "help")
 
 
 async def route_command(update: Update) -> bool:
@@ -82,7 +83,7 @@ async def route_command(update: Update) -> bool:
         # FR-6.6: unknown command. Short reply, no side effects.
         await send_message(
             chat_id,
-            f"Unknown command: /{command}. Try /propose, /pick, /coach, /status, /why.",
+            f"Unknown command: /{command}. Try /propose, /pick, /coach, /status, /why, /help.",
         )
         log.info("command_unknown", command=command)
         return True
@@ -350,6 +351,28 @@ async def _cmd_why(update: Update, args: str) -> None:
     log.info("why_sent", slug=slug, tokens_out=response.tokens_out)
 
 
+async def _cmd_help(update: Update, args: str) -> None:
+    """``/help`` → list all commands with one-line descriptions.
+
+    No args, no LLM, no DB writes. Pure static text. The args parameter
+    is accepted for dispatch-table uniformity but ignored.
+    """
+    chat_id = update.message.chat.id
+    lines = [
+        "LeetCode Coach — commands:",
+        "",
+        "/propose — get 5 problem candidates",
+        "/pick <n1> [<n2>] — pick 1-2 from the list (e.g. /pick 2 5)",
+        "/coach <text> — reply to a problem thread with your code or questions",
+        "  /coach <slug> <text> — coach on a specific problem by slug",
+        "/status — your streak, active lessons, recent activity",
+        "/why <slug> — why a problem was proposed / what lesson it targets",
+        "/help — this message",
+    ]
+    await send_message(chat_id, "\n".join(lines))
+    log.info("help_sent")
+
+
 def _compute_streak(session, today: datetime.date) -> int:
     """Count consecutive days (ending today or yesterday) with ≥1 coached
     attempt (status = 'solved' or 'reviewed').
@@ -396,4 +419,5 @@ _DISPATCH = {
     "coach": _cmd_coach,
     "status": _cmd_status,
     "why": _cmd_why,
+    "help": _cmd_help,
 }

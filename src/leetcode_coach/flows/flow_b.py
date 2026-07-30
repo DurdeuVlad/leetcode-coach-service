@@ -731,7 +731,6 @@ def _lesson_footer(outcome: LessonOutcome) -> str:
         )
     if outcome.action == "retired":
         return (
-            f"Retiring lesson: <b>{html.escape(outcome.title)}</b> "
-            f"— demonstrated consistently."
+            f"Retiring lesson: <b>{html.escape(outcome.title)}</b> " f"— demonstrated consistently."
         )
     return ""

@@ -370,6 +370,16 @@ async def test_propose_5_end_to_end(sqlite_session_factory, monkeypatch):
     # Verify the system prompt was the propose prompt (contains "LeetCode coach").
     call_args = mock_llm.complete.call_args
     assert "leetcode coach" in call_args.args[0].lower()
+    # Flow A sends the LLM's markdown as PLAIN TEXT (no parse_mode). Sending
+    # with parse_mode="MarkdownV2" breaks on real LeetCode titles that
+    # contain `-`, `.`, `(`, `)` (Telegram requires those escaped in V2).
+    # Phase 9 issue #044 replaces this with an HTML card.
+    tg_request = respx.calls.last.request
+    tg_body = tg_request.read()
+    assert b"parse_mode" not in tg_body, (
+        "Flow A must send plain text (no parse_mode); MarkdownV2 breaks on "
+        "real LeetCode titles. See issue #044 for the HTML card replacement."
+    )
 
 
 @pytest.mark.asyncio

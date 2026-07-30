@@ -26,6 +26,7 @@ append, never replace.
 from __future__ import annotations
 
 import datetime
+import html
 import json
 import re
 from dataclasses import dataclass
@@ -318,9 +319,12 @@ async def _pick_parse_path(chat_id: str, text: str, *, dry_run: bool = False) ->
     created_threads: list[dict] = []
     for i, c in enumerate(chosen, start=1):
         # Step 1: send per-problem message, capture message_id.
+        # HTML-escape interpolated fields: titles/hints may contain `<`, `>`,
+        # `&` which would otherwise break Telegram's HTML parser.
         per_problem_text = (
-            f"<b>Problem {i}/{len(chosen)}: {c.title}</b> ({c.difficulty})\n\n"
-            f"{c.coaching_hint}\n\n"
+            f"<b>Problem {i}/{len(chosen)}: {html.escape(c.title)}</b> "
+            f"({html.escape(c.difficulty)})\n\n"
+            f"{html.escape(c.coaching_hint)}\n\n"
             f"Send your code as a reply to this message."
         )
         if dry_run:
@@ -719,9 +723,15 @@ def _lesson_footer(outcome: LessonOutcome) -> str:
     if outcome.action == "none":
         return ""
     if outcome.action == "saved":
-        return f"Saved lesson: <b>{outcome.title}</b>."
+        return f"Saved lesson: <b>{html.escape(outcome.title)}</b>."
     if outcome.action == "reinforced":
-        return f"Reinforcing lesson: <b>{outcome.title}</b> ({outcome.times_reinforced}th time)."
+        return (
+            f"Reinforcing lesson: <b>{html.escape(outcome.title)}</b> "
+            f"({outcome.times_reinforced}th time)."
+        )
     if outcome.action == "retired":
-        return f"Retiring lesson: <b>{outcome.title}</b> — demonstrated consistently."
+        return (
+            f"Retiring lesson: <b>{html.escape(outcome.title)}</b> "
+            f"— demonstrated consistently."
+        )
     return ""

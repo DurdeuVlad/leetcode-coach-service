@@ -250,6 +250,12 @@ async def propose_5(
     _validate_candidates(candidates)
 
     if not dry_run:
+        # Plain text send (no parse_mode): the LLM emits MarkdownV2-style
+        # markup, but LeetCode titles routinely contain characters that
+        # MarkdownV2 requires escaped (`-`, `.`, `(`, `)`, `!`). Sending with
+        # parse_mode="MarkdownV2" causes Telegram to reject the message with
+        # "can't parse entities". Phase 9 issue #044 replaces this send with
+        # a card-style HTML message (with html.escape) that renders reliably.
         await send_message(target_chat, markdown)
     # Persist the 5 candidates so Flow B's pick-parse can map reply numbers
     # → problems (issue #020). Done AFTER the send so a send failure doesn't

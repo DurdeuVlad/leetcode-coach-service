@@ -38,6 +38,7 @@ so work can be picked up, tracked, and checked off one unit at a time.
 | `M5: weekly-refresh` | 5 | Problem pool auto-refreshes weekly | #029 |
 | `M6: deploy` | 6 | Live on Coolify, real proposal next morning | #030, #033 |
 | `M7: hardening` | 7 | Post-v1 calibration & fallbacks | #031 |
+| `M9: phase-9` | 9 | Inline UI + credit/debit budget system | #040–#049 |
 
 ## Labels
 
@@ -83,6 +84,8 @@ flowchart TD
     M4 --> M6
     M5 --> M6
     M6 --> M7[M7 hardening]
+    M7 --> M9[M9 phase-9 inline UI]
+    M3 --> M9
 ```
 
 Within phases the sharp edges are:
@@ -143,3 +146,15 @@ Within phases the sharp edges are:
 
 ### M7 — hardening
 - [ ] [#031 — Post-v1 hardening backlog](issues/031-hardening-backlog.md)
+
+### M9 — phase-9 (inline UI + credit/debit budget system)
+- [ ] [#040 — Credit ledger table + migration](issues/040-credit-ledger-table.md)
+- [ ] [#041 — Credit calculation + format_balance](issues/041-credit-calculation.md)
+- [ ] [#042 — Scheduler jobs (daily tax, queue refill, nudge)](issues/042-scheduler-jobs.md)
+- [ ] [#043 — Callback query handler infrastructure](issues/043-callback-handler-infra.md)
+- [ ] [#044 — Propose card UI](issues/044-propose-card-ui.md)
+- [ ] [#045 — Per-problem thread action buttons](issues/045-thread-action-buttons.md)
+- [ ] [#046 — Coach followup buttons](issues/046-coach-followup-buttons.md)
+- [ ] [#047 — Nudge flow with inline buttons](issues/047-nudge-flow.md)
+- [ ] [#048 — Pinned message credits display](issues/048-pinned-credits-display.md)
+- [ ] [#049 — Expiry redesign (22:00 + Extend button)](issues/049-expiry-redesign.md)

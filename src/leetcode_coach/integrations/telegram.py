@@ -73,13 +73,21 @@ async def set_webhook(webhook_url: str) -> None:
     await _call("setWebhook", payload)
 
 
-async def send_message(chat_id: str, text: str, *, reply_markup: dict | None = None) -> int:
+async def send_message(
+    chat_id: str,
+    text: str,
+    *,
+    reply_markup: dict | None = None,
+    parse_mode: str | None = None,
+) -> int:
     """Send a message, return the resulting message_id.
 
     Used by Flow A (the 5-candidate list), the expiry sweep (summary), and
     `errors.send_alert` (alerts). `reply_markup` accepts an
     `InlineKeyboardMarkup`-shaped dict for the 5-button pick UI in Flow B.
-    Returns -1 in mock mode.
+    `parse_mode` sets Telegram's formatting mode — ``"MarkdownV2"`` for the
+    propose list, ``"HTML"`` for coach feedback / per-problem messages,
+    ``None`` (default) for plain text. Returns -1 in mock mode.
 
     NFR-4: only the configured `TELEGRAM_CHAT_ID` is a valid target. Any
     other chat_id is rejected before hitting the API.
@@ -91,18 +99,26 @@ async def send_message(chat_id: str, text: str, *, reply_markup: dict | None = N
     payload: dict = {"chat_id": chat_id, "text": text}
     if reply_markup is not None:
         payload["reply_markup"] = reply_markup
+    if parse_mode is not None:
+        payload["parse_mode"] = parse_mode
     data = await _call("sendMessage", payload)
     return int(data["result"]["message_id"])
 
 
 async def send_reply(
-    chat_id: str, reply_to_message_id: int, text: str, *, reply_markup: dict | None = None
+    chat_id: str,
+    reply_to_message_id: int,
+    text: str,
+    *,
+    reply_markup: dict | None = None,
+    parse_mode: str | None = None,
 ) -> int:
     """Send a message replying to a specific prior message.
 
     Used by Flow B's per-problem coach feedback. `reply_to_message_id` is
     the inbound `Message.message_id` being replied to (not `update_id`).
-    Returns -1 in mock mode.
+    `parse_mode` sets Telegram's formatting mode — ``"HTML"`` for coach
+    feedback, ``None`` (default) for plain text. Returns -1 in mock mode.
 
     NFR-4: only the configured `TELEGRAM_CHAT_ID` is a valid target.
     """
@@ -122,16 +138,23 @@ async def send_reply(
     }
     if reply_markup is not None:
         payload["reply_markup"] = reply_markup
+    if parse_mode is not None:
+        payload["parse_mode"] = parse_mode
     data = await _call("sendMessage", payload)
     return int(data["result"]["message_id"])
 
 
-async def edit_message_text(chat_id: str, message_id: int, text: str) -> dict:
+async def edit_message_text(
+    chat_id: str, message_id: int, text: str, *, parse_mode: str | None = None
+) -> dict:
     """Edit the text of an existing message. Returns the raw API result.
 
     Used by the pinned progression message refresh (#039, FR-8.4). On
     failure (message deleted, permissions changed), the caller catches
     `TelegramError` and creates a new pinned message.
+
+    `parse_mode` sets Telegram's formatting mode — ``None`` (default) for
+    plain text, which is what the pinned snapshot uses.
 
     The "message is not modified" case (Telegram 400 with that exact
     description) is NOT raised here — it surfaces as a `TelegramError` and
@@ -145,6 +168,8 @@ async def edit_message_text(chat_id: str, message_id: int, text: str) -> dict:
         log.info("edit_message_text_mock", chat_id=chat_id, message_id=message_id, text=text[:200])
         return {"ok": True}
     payload: dict = {"chat_id": chat_id, "message_id": message_id, "text": text}
+    if parse_mode is not None:
+        payload["parse_mode"] = parse_mode
     return await _call("editMessageText", payload)
 
 

@@ -55,6 +55,11 @@ nudges until tomorrow morning).
   - Store `nudge_snoozed_until` = tomorrow's date in `bot_state`.
   - Edit nudge message to remove buttons, append "\n😴 Snoozed to tomorrow."
   - Answer callback with toast "Snoozed. I'll remind you tomorrow.".
+- [ ] **Register action handlers** (per #043's `register_action`):
+      `register_action("nudge_solve", handle_nudge_solve)`,
+      `register_action("nudge_accept", handle_nudge_accept)`,
+      `register_action("nudge_snooze", handle_nudge_snooze)`. This wiring
+      is mandatory, not implicit.
 - [ ] `tests/test_nudge.py`:
   - Nudge sent when balance < 0 and not snoozed.
   - Nudge NOT sent when balance ≥ 0.

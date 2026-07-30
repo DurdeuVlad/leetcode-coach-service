@@ -37,6 +37,12 @@ This Lesson explains the lesson that was saved/reinforced.
   - `[🤔 Why This Lesson?]` → `callback_data=encode_callback_data("why_lesson", slug)`
   - Only add buttons if the coach pass completed successfully (not dry_run).
   - Note: `why_lesson` + `:` + slug may exceed 64 bytes for long slugs;
+    use `encode_callback_data` from #043 (handles via MD5 hash mapping).
+- [ ] **Register action handlers** (per #043's `register_action`):
+      `register_action("next", handle_next)`,
+      `register_action("reattempt", handle_reattempt)`,
+      `register_action("why_lesson", handle_why_lesson)`. This wiring is
+      mandatory, not implicit.
     `encode_callback_data` (from #043) handles this via hash mapping.
 - [ ] `webhooks/callbacks.py`: implement `handle_next(slug, callback_query)`:
   - Find next `pending_review` with `status='open'`, `proposed_at=today`,

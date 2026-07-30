@@ -22,7 +22,7 @@ cancel resets.
   parse_mode="MarkdownV2")` (line 253) and does NOT capture the returned
   `message_id`. This issue must capture it and store it in `bot_state` as
   `propose_message_id` (needed by #049's expiry edit).
-- `propose_5` returns the markdown string (line 217). Switching to HTML
+- `propose_5` returns the markdown string (line 277). Switching to HTML
   changes the return value. Tests that assert on the return value will
   break and must be updated.
 - Pick flow (decision #2): direct pick, no confirm. Tap one → message edits
@@ -49,6 +49,12 @@ cancel resets.
   - Difficulty badges: 🔴 hard, 🟡 medium, 🟢 easy
   - Footer: `<b>Credits: {format_balance(balance)}</b>` (from #041)
   - Returns HTML string (to be sent with `parse_mode="HTML"`).
+  - **HTML-escape** all interpolated fields (`html.escape(title)`,
+    `html.escape(reasoning)`, `html.escape(coaching_hint)`) to prevent
+    Telegram parse errors on titles containing `<`, `>`, `&`.
+- [ ] **Register action handlers** (per #043's `register_action`):
+      `register_action("pick", handle_pick)`, `register_action("cancel",
+      handle_cancel)`. This wiring is mandatory, not implicit.
 - [ ] `flows/flow_a.py`: modify `propose_5`:
   - After `_parse_candidates` + `_validate_candidates`, call
     `_build_propose_html(candidates)` instead of using the LLM's `markdown`.

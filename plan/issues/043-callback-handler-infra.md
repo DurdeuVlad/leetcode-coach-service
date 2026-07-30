@@ -54,8 +54,15 @@ and `edit_message_reply_markup` (swap/remove buttons).
       "Unknown action" + log warning.
     - Return True if handled, False if not a callback query.
   - Action handler registry: `dict[str, Callable]` mapping action → async
-    function. Handlers are registered in #044-#047; this issue only builds
-    the dispatch infrastructure + the registry.
+    function. This issue builds the registry + a `register_action(action,
+    handler)` helper. **Each of #044–#047 must call `register_action` to
+    wire its handlers** — registration is an explicit task in those issues,
+    not implicit. This issue only builds the dispatch infrastructure + the
+    registry + the registration helper.
+  - `def register_action(action: str, handler: Callable) -> None`:
+    Adds `handler` to the registry under `action`. Called at import time
+    by #044–#047 (e.g. `register_action("pick", handle_pick)`). Raises
+    `ValueError` on duplicate registration to catch wiring bugs early.
   - `def encode_callback_data(action: str, slug: str) -> str`:
     - If `len(action) + 1 + len(slug) <= 64` → return `f"{action}:{slug}"`.
     - Else → compute `hashlib.md5(slug.encode()).hexdigest()[:8]`, store

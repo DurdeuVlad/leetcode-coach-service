@@ -28,7 +28,7 @@ with 0.25 credits, Why runs the /why flow inline.
   coupled to `update.message.chat.id` and calls `send_message` directly —
   it is NOT a reusable function that returns text. This issue must extract
   a `_generate_why_explanation(slug) -> str` helper from `_cmd_why` (the
-  context-gathering + LLM call, lines 302-348), then both `_cmd_why` and
+  context-gathering + LLM call, lines 302-349), then both `_cmd_why` and
   `handle_why` call it. Read-only, no DB writes.
 - **Soft dependency on #044:** both issues modify the per-problem thread
   message builder in `_pick_parse_path` (or its extracted helper
@@ -38,9 +38,14 @@ with 0.25 credits, Why runs the /why flow inline.
 
 ## Tasks
 - [ ] `flows/commands.py`: extract `_generate_why_explanation(slug: str) -> str`
-      from `_cmd_why` (lines 302-348: context gathering + LLM call). Refactor
+      from `_cmd_why` (lines 302-349: context gathering + LLM call). Refactor
       `_cmd_why` to call it then `send_message` the result. Pure refactor —
       no behavior change to `/why`.
+- [ ] **Register action handlers** (per #043's `register_action`):
+      `register_action("skip", handle_skip)`, `register_action("hint",
+      handle_hint)`, `register_action("solution", handle_solution)`,
+      `register_action("why", handle_why)`. This wiring is mandatory, not
+      implicit.
 - [ ] `flows/flow_b.py`: in `_create_threads_for_candidates` (extracted in
       #044) OR in `_pick_parse_path` (if #044 hasn't landed — coordinate),
       add inline keyboard to the per-problem message:

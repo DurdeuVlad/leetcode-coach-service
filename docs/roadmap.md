@@ -1,6 +1,6 @@
 # Roadmap — LeetCode Coach Service
 
-Status: plan | Owner: Vlad | Last revised: 2026-07-26
+Status: plan | Owner: Vlad | Last revised: 2026-07-30
 Companion to `business-requirements.md` (the contract) and `architecture.md`
 (the design). Phased so each phase ships something testable on its own.
 
@@ -233,39 +233,77 @@ on dev as of 2026-07-29) — the `dry_run`-capable flow internals are the
 template for the command handlers.
 
 ### Phase 8a — Slash commands (FR-6)
-- [ ] Command router: parse `/`-prefixed messages before FR-2.2 reply
+- [x] Command router: parse `/`-prefixed messages before FR-2.2 reply
       correlation (`flow_b.handle_update`).
-- [ ] `/propose` → call `flow_a.propose_5(dry_run=False)`.
-- [ ] `/pick <n1> [<n2>]` → call `flow_b._pick_parse_path` with the parsed
+- [x] `/propose` → call `flow_a.propose_5(dry_run=False)`.
+- [x] `/pick <n1> [<n2>]` → call `flow_b._pick_parse_path` with the parsed
       indices.
-- [ ] `/coach <text>` (and `/coach <slug> <text>` form) → call
+- [x] `/coach <text>` (and `/coach <slug> <text>` form) → call
       `flow_b._coach_pass_path` + `_post_coach_updates`.
-- [ ] Unknown command → short "unknown command" reply, no LLM, no DB write.
-- [ ] Tests: command router dispatch, each command path, unknown command,
+- [x] Unknown command → short "unknown command" reply, no LLM, no DB write.
+- [x] Tests: command router dispatch, each command path, unknown command,
       non-allowlisted chat rejected.
 
 ### Phase 8b — Progression queries (FR-7)
-- [ ] `/status` → deterministic text dump (active lessons, last 7 days of
+- [x] `/status` → deterministic text dump (active lessons, last 7 days of
       `leetcode_log`, current streak). No LLM call.
-- [ ] `/why <slug>` → single LLM call, 2-3 sentences on why a problem was
+- [x] `/why <slug>` → single LLM call, 2-3 sentences on why a problem was
       proposed / what lesson it targets.
-- [ ] Tests: `/status` output shape against seeded DB; `/why` mocked LLM
+- [x] Tests: `/status` output shape against seeded DB; `/why` mocked LLM
       single-call bound.
 
 ### Phase 8c — Pinned progression message (FR-8)
-- [ ] `bot_state` table + Alembic migration (key/value/updated_at).
-- [ ] `integrations/telegram.py`: `edit_message_text`, `pin_message`,
+- [x] `bot_state` table + Alembic migration (key/value/updated_at).
+- [x] `integrations/telegram.py`: `edit_message_text`, `pin_message`,
       `unpin_message` helpers.
-- [ ] Snapshot builder: today's status counts, active lessons count,
+- [x] Snapshot builder: today's status counts, active lessons count,
       current streak.
-- [ ] Refresh hook called after Flow A run, Flow B pick, Flow B coach.
-- [ ] Recovery: if `editMessageText` fails, create + pin a new message and
+- [x] Refresh hook called after Flow A run, Flow B pick, Flow B coach.
+- [x] Recovery: if `editMessageText` fails, create + pin a new message and
       store the new ID in `bot_state`.
-- [ ] Tests: snapshot builder, refresh hook, recovery path.
+- [x] Tests: snapshot builder, refresh hook, recovery path.
 
 **Exit criteria:** from Telegram, `/propose` → `/pick 1` → `/coach <code>`
 runs the full pipeline; `/status` shows the just-coached attempt; the pinned
 message updates after each step. All tests green.
+✅ Met — merged in `e6380a0` (PR #49). 137/137 tests green. Slash commands
+(`/propose`, `/pick`, `/coach`, `/status`, `/why`), pinned progression
+message with recovery path, and HTTP request logging all live on master.
+
+## Phase 9 — Inline UI + credit/debit budget system (planning)
+
+**Goal:** replace the text-only 5-list with inline-button cards, add a
+credit/debit budget system that rewards engagement, and redesign expiry
+as user-controlled via buttons. Planned in `plan/PHASE9_DESIGN.md`
+(issues #040–#049).
+
+**Status:** planning only — implementation has not started. The design
+doc and issues live in `plan/` as the execution backlog. The
+credit/tax/timing values in the design are **provisional defaults pending
+Phase 7 calibration** (see `business-requirements.md` §8); they are not
+fixed decisions and must be tuned with real runtime data before being
+treated as final.
+
+- [ ] `credit_ledger` table + Alembic migration (issue #040).
+- [ ] Credit calculation + `format_balance` helper (issue #041).
+- [ ] Scheduler jobs: daily tax (midnight), queue refill check (replaces
+      09:05 propose), nudge at 20:00 (issue #042).
+- [ ] Callback query handler infrastructure + `answer_callback_query` +
+      `edit_message_reply_markup` wrappers (issue #043).
+- [ ] Propose card UI: inline buttons, capture `propose_message_id`
+      (issue #044).
+- [ ] Per-problem thread action buttons: pick/cancel/skip/hint/solution/why
+      (issue #045).
+- [ ] Coach followup buttons: next/reattempt/why-lesson (issue #046).
+- [ ] Nudge flow with inline buttons (issue #047).
+- [ ] Pinned message credits display (issue #048).
+- [ ] Expiry redesign: 22:00 sweep with [Extend to Tomorrow] button, no
+      status change / Google Tasks / summary message (issue #049).
+
+**Exit criteria:** inline buttons render correctly on Telegram; credit
+balance updates after every solve/review/saw-solution/skip; nudge fires
+at 20:00 when balance < 0; expiry offers [Extend] instead of auto-expiring.
+All tests green.
 
 ## What we explicitly defer
 
@@ -283,7 +321,9 @@ are the three flows in dependency order: Flow A must exist before Flow B's
 pick-parse path can be tested (Flow B reads Flow A's candidate list); Flow B
 must exist before the expiry sweep is meaningful (expiry acts on
 `pending_review` rows Flow B creates). Phase 5 is independent and small.
-Phase 6 is the deploy gate. Phase 7 is open-ended.
+Phase 6 is the deploy gate. Phase 7 is open-ended. Phase 9 (inline UI +
+credit/budget system) builds on the Phase 8 command router and pinned
+message; its planning lives in `plan/PHASE9_DESIGN.md`.
 
 The two n8n business-logic bugs (missing unsolved pool, missing Google Task
 notes append) are fixed in the phase where the relevant code is written —

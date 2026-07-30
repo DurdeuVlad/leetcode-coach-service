@@ -337,9 +337,9 @@ async def test_status_shows_lessons_log_and_streak(sqlite_session_factory):
     async def _fake_send(chat_id, text, **kwargs):
         # Slash-command replies are plain text (no parse_mode). Guard against
         # accidentally leaking HTML/MarkdownV2 into command responses.
-        assert kwargs.get("parse_mode") is None, (
-            f"command reply must be plain text, got parse_mode={kwargs.get('parse_mode')!r}"
-        )
+        assert (
+            kwargs.get("parse_mode") is None
+        ), f"command reply must be plain text, got parse_mode={kwargs.get('parse_mode')!r}"
         sent.append(text)
 
     with (
@@ -376,9 +376,9 @@ async def test_status_streak_zero_when_no_coached(sqlite_session_factory):
     async def _fake_send(chat_id, text, **kwargs):
         # Slash-command replies are plain text (no parse_mode). Guard against
         # accidentally leaking HTML/MarkdownV2 into command responses.
-        assert kwargs.get("parse_mode") is None, (
-            f"command reply must be plain text, got parse_mode={kwargs.get('parse_mode')!r}"
-        )
+        assert (
+            kwargs.get("parse_mode") is None
+        ), f"command reply must be plain text, got parse_mode={kwargs.get('parse_mode')!r}"
         sent.append(text)
 
     with (
@@ -404,9 +404,9 @@ async def test_why_no_args_replies_usage(sqlite_session_factory):
     async def _fake_send(chat_id, text, **kwargs):
         # Slash-command replies are plain text (no parse_mode). Guard against
         # accidentally leaking HTML/MarkdownV2 into command responses.
-        assert kwargs.get("parse_mode") is None, (
-            f"command reply must be plain text, got parse_mode={kwargs.get('parse_mode')!r}"
-        )
+        assert (
+            kwargs.get("parse_mode") is None
+        ), f"command reply must be plain text, got parse_mode={kwargs.get('parse_mode')!r}"
         sent.append(text)
 
     with (
@@ -431,9 +431,9 @@ async def test_why_bad_slug_replies_no_such_problem(sqlite_session_factory):
     async def _fake_send(chat_id, text, **kwargs):
         # Slash-command replies are plain text (no parse_mode). Guard against
         # accidentally leaking HTML/MarkdownV2 into command responses.
-        assert kwargs.get("parse_mode") is None, (
-            f"command reply must be plain text, got parse_mode={kwargs.get('parse_mode')!r}"
-        )
+        assert (
+            kwargs.get("parse_mode") is None
+        ), f"command reply must be plain text, got parse_mode={kwargs.get('parse_mode')!r}"
         sent.append(text)
 
     with (
@@ -459,9 +459,9 @@ async def test_why_valid_slug_makes_one_llm_call(sqlite_session_factory):
     async def _fake_send(chat_id, text, **kwargs):
         # Slash-command replies are plain text (no parse_mode). Guard against
         # accidentally leaking HTML/MarkdownV2 into command responses.
-        assert kwargs.get("parse_mode") is None, (
-            f"command reply must be plain text, got parse_mode={kwargs.get('parse_mode')!r}"
-        )
+        assert (
+            kwargs.get("parse_mode") is None
+        ), f"command reply must be plain text, got parse_mode={kwargs.get('parse_mode')!r}"
         sent.append(text)
 
     mock_response = AsyncMock()
@@ -712,9 +712,9 @@ async def test_coach_two_open_reviews_no_slug_replies_with_list(sqlite_session_f
     async def _fake_send(chat_id, text, **kwargs):
         # Slash-command replies are plain text (no parse_mode). Guard against
         # accidentally leaking HTML/MarkdownV2 into command responses.
-        assert kwargs.get("parse_mode") is None, (
-            f"command reply must be plain text, got parse_mode={kwargs.get('parse_mode')!r}"
-        )
+        assert (
+            kwargs.get("parse_mode") is None
+        ), f"command reply must be plain text, got parse_mode={kwargs.get('parse_mode')!r}"
         sent.append(text)
 
     with (
@@ -741,9 +741,9 @@ async def test_coach_zero_open_reviews_replies_no_open_problems(sqlite_session_f
     async def _fake_send(chat_id, text, **kwargs):
         # Slash-command replies are plain text (no parse_mode). Guard against
         # accidentally leaking HTML/MarkdownV2 into command responses.
-        assert kwargs.get("parse_mode") is None, (
-            f"command reply must be plain text, got parse_mode={kwargs.get('parse_mode')!r}"
-        )
+        assert (
+            kwargs.get("parse_mode") is None
+        ), f"command reply must be plain text, got parse_mode={kwargs.get('parse_mode')!r}"
         sent.append(text)
 
     with (
@@ -795,9 +795,9 @@ async def test_coach_reply_to_non_problem_message_replies_error(sqlite_session_f
     async def _fake_send(chat_id, text, **kwargs):
         # Slash-command replies are plain text (no parse_mode). Guard against
         # accidentally leaking HTML/MarkdownV2 into command responses.
-        assert kwargs.get("parse_mode") is None, (
-            f"command reply must be plain text, got parse_mode={kwargs.get('parse_mode')!r}"
-        )
+        assert (
+            kwargs.get("parse_mode") is None
+        ), f"command reply must be plain text, got parse_mode={kwargs.get('parse_mode')!r}"
         sent.append(text)
 
     with (
@@ -811,3 +811,84 @@ async def test_coach_reply_to_non_problem_message_replies_error(sqlite_session_f
     assert len(sent) == 1
     assert "isn't an open problem thread" in sent[0]
     flow_b_mock._coach_pass_path.assert_not_called()
+
+
+# ===========================================================================
+# /help — static command list, no LLM, no DB write
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+async def test_help_lists_all_commands():
+    """/help → one message listing every known command."""
+    update = _make_update(text="/help")
+    sent = []
+
+    async def _fake_send(chat_id, text, **kwargs):
+        assert kwargs.get("parse_mode") is None
+        sent.append(text)
+
+    with patch.object(commands_module, "send_message", _fake_send):
+        await route_command(update)
+
+    assert len(sent) == 1
+    msg = sent[0]
+    for cmd in ("/propose", "/pick", "/coach", "/status", "/why", "/help"):
+        assert cmd in msg, f"{cmd} missing from /help output"
+
+
+@pytest.mark.asyncio
+async def test_help_no_llm_no_db():
+    """/help makes zero LLM calls and zero DB accesses."""
+    update = _make_update(text="/help")
+
+    with (
+        patch.object(commands_module, "send_message", AsyncMock()),
+        patch.object(commands_module, "LLMClient") as llm_mock,
+        patch.object(commands_module, "get_session") as session_mock,
+    ):
+        llm_mock.return_value.complete = AsyncMock()
+        await route_command(update)
+
+    llm_mock.return_value.complete.assert_not_called()
+    session_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_help_case_insensitive():
+    """/Help and /HELP → dispatches to help handler."""
+
+    for text in ("/Help", "/HELP", "/HeLp"):
+        await _assert_help_replies(text)
+
+
+async def _assert_help_replies(text: str) -> None:
+    """Helper: send `text` as a command, assert the help reply is returned."""
+    update = _make_update(text=text)
+    captured: list[str] = []
+
+    async def _fake_send(chat_id, t, **kwargs):
+        captured.append(t)
+
+    with patch.object(commands_module, "send_message", _fake_send):
+        await route_command(update)
+
+    assert len(captured) == 1
+    assert "/propose" in captured[0]
+
+
+@pytest.mark.asyncio
+async def test_help_ignores_args():
+    """/help foo bar → still shows help (args ignored)."""
+    update = _make_update(text="/help foo bar")
+    sent = []
+
+    async def _fake_send(chat_id, text, **kwargs):
+        assert kwargs.get("parse_mode") is None
+        sent.append(text)
+
+    with patch.object(commands_module, "send_message", _fake_send):
+        await route_command(update)
+
+    assert len(sent) == 1
+    assert "/propose" in sent[0]

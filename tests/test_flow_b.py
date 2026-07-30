@@ -337,9 +337,9 @@ async def test_pick_parse_two_picks_creates_two_threads(sqlite_session_factory):
     async def _fake_send(chat_id, text, **kwargs):
         # Per-problem thread messages must be sent with parse_mode="HTML"
         # (Phase 9 prep: HTML-formatted card with html.escape'd titles).
-        assert kwargs.get("parse_mode") == "HTML", (
-            f"per-problem send must use parse_mode=HTML, got {kwargs.get('parse_mode')!r}"
-        )
+        assert (
+            kwargs.get("parse_mode") == "HTML"
+        ), f"per-problem send must use parse_mode=HTML, got {kwargs.get('parse_mode')!r}"
         mid = next(msg_ids)
         sent_msgs.append((mid, text))
         return mid
@@ -470,9 +470,9 @@ async def test_coach_path_runs_five_steps_in_order(sqlite_session_factory):
         call_order.append("reply")
         # Coach reply must be sent with parse_mode="HTML" (the coach prompt
         # emits HTML-formatted feedback with <b> tags for the lesson footer).
-        assert kwargs.get("parse_mode") == "HTML", (
-            f"coach reply must use parse_mode=HTML, got {kwargs.get('parse_mode')!r}"
-        )
+        assert (
+            kwargs.get("parse_mode") == "HTML"
+        ), f"coach reply must use parse_mode=HTML, got {kwargs.get('parse_mode')!r}"
         sent_replies.append(text)
 
     with (

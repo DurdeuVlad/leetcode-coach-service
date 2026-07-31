@@ -14,11 +14,25 @@ _SEARXNG_BASE = "https://search.example.com"
 
 
 @pytest.mark.asyncio
-async def test_disabled_without_url_raises_youtube_disabled() -> None:
-    get_settings.cache_clear()
+async def test_disabled_without_url_raises_youtube_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Patch get_settings in the youtube module directly. The other tests in
+    # this file use monkeypatch.setenv, which overrides .env via env-var
+    # precedence. But this test needs searxng_url="" — and monkeypatch.delenv
+    # only clears os.environ, not the .env file pydantic-settings also reads.
+    # Patching the module-level get_settings (same pattern as conftest's
+    # telegram_test_settings and test_connectivity's _settings) is the only
+    # way to guarantee the disabled path regardless of .env or shell state.
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        youtube,
+        "get_settings",
+        lambda: SimpleNamespace(searxng_url=""),
+    )
     with pytest.raises(YouTubeDisabled):
         await youtube.search_walkthroughs("Two Sum")
-    get_settings.cache_clear()
 
 
 @pytest.mark.asyncio

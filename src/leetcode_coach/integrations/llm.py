@@ -321,8 +321,11 @@ _MOCK_COACH: dict[str, Any] = {
         "<b>Next step:</b> add an empty-input guard before your next attempt."
     ),
     "lesson_title": "check empty input before indexing",
-    "lesson_category": "defensive-coding",
+    "lesson_category": "hash-map",
+    "lesson_is_recurring": False,
     "lesson_should_graduate": False,
+    "solved": True,
     "status": "solved",
+    "next_step": "add an empty-input guard before your next attempt",
     "time_spent_min": 18,
 }

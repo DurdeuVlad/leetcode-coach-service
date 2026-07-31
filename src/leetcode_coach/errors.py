@@ -2,15 +2,13 @@
 
 Per NFR-1 (business-requirements.md §6), there are three error layers:
 1. Retry on transient failures (handled by tenacity in the integration clients).
-2. Typed error branches for known non-recoverable failures — specifically
-   `GoogleAuthExpiredError`, routed to a distinct Telegram alert.
+2. Typed error branches for known non-recoverable failures.
 3. Global catch that sends one Telegram alert for anything that escapes
    layers 1 and 2.
 
 This module defines the typed exceptions (layer 2) and the `send_alert`
 helper used by layer 3. The integration clients raise these; the flows
-catch `GoogleAuthExpiredError` specifically and let everything else bubble
-to the global handler.
+let everything bubble to the global handler.
 
 `send_alert` is mock-aware: if `TELEGRAM_BOT_TOKEN` is the placeholder
 `mock` or empty, it logs the alert instead of calling Telegram. This lets
@@ -26,16 +24,6 @@ log = structlog.get_logger("errors")
 
 class LeetCodeCoachError(Exception):
     """Base for all typed errors in the system."""
-
-
-class GoogleAuthExpiredError(LeetCodeCoachError):
-    """Google OAuth refresh token is expired or revoked (invalid_grant).
-
-    Routed to a distinct Telegram alert at the flow level, NOT to the global
-    handler. Root cause is the GCP consent screen being in Testing status
-    (7-day hard expiry). The fix is to flip it to `In production`.
-    See docs/architecture.md §6 and n8n-reference/README.md lines 325-353.
-    """
 
 
 class LLMError(LeetCodeCoachError):
@@ -77,8 +65,7 @@ class YouTubeDisabled(LeetCodeCoachError):
 async def send_alert(message: str) -> None:
     """Send one Telegram alert to the configured chat.
 
-    Used by the global catch (layer 3) and by the Google auth branch
-    (layer 2, with a distinct message). Mock-aware: if the bot token is
+    Used by the global catch (layer 3). Mock-aware: if the bot token is
     the placeholder `mock` or empty, log the alert instead of calling
     Telegram — this lets the app run end-to-end in development without
     real credentials.

@@ -91,10 +91,11 @@ def _build_snapshot() -> str:
         streak = _compute_streak(session, today)
 
     lines = [
-        "📊 Today's Progress",
-        f"Proposed: {proposed} | Picked: {picked} | Coached: {coached} | Expired: {expired}",
-        f"📚 Active lessons: {active_lessons}",
-        f"🔥 Streak: {streak} day{'s' if streak != 1 else ''}",
+        "📊 <b>Today's Progress</b>",
+        f"Proposed: <b>{proposed}</b> | Picked: <b>{picked}</b> | "
+        f"Coached: <b>{coached}</b> | Expired: <b>{expired}</b>",
+        f"📚 Active lessons: <b>{active_lessons}</b>",
+        f"🔥 Streak: <b>{streak}</b> day{'s' if streak != 1 else ''}",
     ]
     return "\n".join(lines)
 
@@ -126,7 +127,7 @@ async def refresh_pinned_message() -> None:
 
     pinned_id = int(pinned_id_str)
     try:
-        await edit_message_text(chat_id, pinned_id, snapshot)
+        await edit_message_text(chat_id, pinned_id, snapshot, parse_mode="HTML")
         log.info("pinned_refreshed", message_id=pinned_id)
     except TelegramError as e:
         err_str = str(e).lower()
@@ -146,7 +147,7 @@ async def refresh_pinned_message() -> None:
 
 async def _create_and_pin(chat_id: str, snapshot: str) -> None:
     """Create a new pinned message and store its ID in bot_state."""
-    message_id = await send_message(chat_id, snapshot)
+    message_id = await send_message(chat_id, snapshot, parse_mode="HTML")
     if message_id == -1:
         # Mock mode — don't store a fake ID.
         log.info("pinned_mock_mode")

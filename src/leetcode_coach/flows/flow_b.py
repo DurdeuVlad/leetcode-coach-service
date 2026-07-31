@@ -16,11 +16,6 @@ The adaptability loop (FR-2.6) is double-gated for graduation:
 - the DB row's `times_reinforced >= 5` (read from DB, NOT from the coach —
   AGENTS.md gotcha #4: the coach hallucinating a count is a known failure
   mode).
-
-BUG-2 fix (FR-2.7 step 3, AGENTS.md gotcha #2): the n8n `mark complete`
-node dropped coach feedback by replacing notes. We call
-`google_tasks.mark_complete(task_id, notes_append=tutor_feedback)` —
-append, never replace.
 """
 
 from __future__ import annotations
@@ -32,7 +27,7 @@ import re
 from dataclasses import dataclass
 
 import structlog
-from sqlmodel import select
+from sqlmodel import Session, select
 from telegram import Update
 
 from leetcode_coach.db.base import get_session
@@ -44,7 +39,6 @@ from leetcode_coach.db.models import (
     TutorLesson,
 )
 from leetcode_coach.errors import LeetCodeCoachError
-from leetcode_coach.integrations.google_tasks import create_task, mark_complete
 from leetcode_coach.integrations.llm import LLMClient, parse_json_response
 from leetcode_coach.integrations.telegram import send_message, send_reply
 from leetcode_coach.prompts.coach import COACH_PROMPT, COACH_SYSTEM
@@ -61,6 +55,10 @@ MAX_PICKS = 2
 # FR-2.5 status-note keywords (lowercase). The coach prompt handles the
 # branch within the LLM call, but we use these for a tiny log hint.
 _STATUS_KEYWORDS = ("skipped", "saw solution", "saw the solution")
+
+# Difficulty → emoji badge for the per-problem thread (matches the propose
+# card in flow_a._DIFFICULTY_BADGE; docs/telegram-formatting.md §3.2.2).
+_DIFFICULTY_BADGE = {"easy": "🟢", "medium": "🟡", "hard": "🔴"}
 
 
 # --- Coach response contract (#024) ---
@@ -266,12 +264,11 @@ async def _pick_parse_path(chat_id: str, text: str, *, dry_run: bool = False) ->
 
     FR-2.4: for each chosen problem, IN ORDER:
     1. Send per-problem Telegram message (incl. coaching_hint); capture message_id.
-    2. Create Google Task (title, notes, due=next day); capture task_id.
-    3. Insert pending_review row (message_id, google_task_id, slug, title, today, open).
+    2. Insert pending_review row (message_id, slug, title, today, open).
 
     When ``dry_run`` is True, Telegram sends are skipped (message_id = -1) but
-    Google Tasks and pending_review rows are still created. Returns a list of
-    dicts describing each created thread (empty in the non-dry-run path).
+    pending_review rows are still created. Returns a list of dicts describing
+    each created thread (empty in the non-dry-run path).
     """
     # FR-2.3: regex parse, cap at MAX_PICKS.
     nums = [int(n) for n in re.findall(r"\d+", text)]
@@ -315,32 +312,29 @@ async def _pick_parse_path(chat_id: str, text: str, *, dry_run: bool = False) ->
     log.info("flow_b_pick_parse_chosen", count=len(chosen), indices=nums, dry_run=dry_run)
 
     # FR-2.4: per-pick side effects, in order.
-    due_date = (today + datetime.timedelta(days=1)).isoformat()
     created_threads: list[dict] = []
     for i, c in enumerate(chosen, start=1):
         # Step 1: send per-problem message, capture message_id.
         # HTML-escape interpolated fields: titles/hints may contain `<`, `>`,
-        # `&` which would otherwise break Telegram's HTML parser.
+        # `&` which would otherwise break Telegram's HTML parser. The
+        # hyperlink + difficulty badge match the propose card shape
+        # (docs/telegram-formatting.md §3.2.2).
+        badge = _DIFFICULTY_BADGE.get(c.difficulty.lower(), "")
         per_problem_text = (
-            f"<b>Problem {i}/{len(chosen)}: {html.escape(c.title)}</b> "
-            f"({html.escape(c.difficulty)})\n\n"
-            f"{html.escape(c.coaching_hint)}\n\n"
-            f"Send your code as a reply to this message."
+            f'<b>Problem {i}/{len(chosen)}: <a href="{html.escape(c.url, quote=True)}">'
+            f"{html.escape(c.title)}</a></b> {badge} {html.escape(c.difficulty)}\n\n"
+            f"<blockquote>{html.escape(c.coaching_hint)}</blockquote>\n\n"
+            f"Reply to this message with your code."
         )
         if dry_run:
             message_id = -1
         else:
             message_id = await send_message(chat_id, per_problem_text, parse_mode="HTML")
 
-        # Step 2: create Google Task, capture task_id.
-        notes = f"slug: {c.slug}\nreasoning: {c.reasoning}\nhint: {c.coaching_hint}"
-        task_id = await create_task(c.title, notes, due_date)
-
-        # Step 3: insert pending_review row.
+        # Step 2: insert pending_review row.
         with next(get_session()) as session:
             review = PendingReview(
                 message_id=message_id,
-                google_task_id=task_id,
                 problem_slug=c.slug,
                 problem_title=c.title,
                 proposed_at=today,
@@ -354,7 +348,6 @@ async def _pick_parse_path(chat_id: str, text: str, *, dry_run: bool = False) ->
             "flow_b_pick_parse_created",
             problem_slug=c.slug,
             message_id=message_id,
-            task_id=task_id,
             dry_run=dry_run,
         )
         created_threads.append(
@@ -364,7 +357,6 @@ async def _pick_parse_path(chat_id: str, text: str, *, dry_run: bool = False) ->
                 "problem_title": c.title,
                 "difficulty": c.difficulty,
                 "message_id": message_id,
-                "task_id": task_id,
                 "pending_review_id": pending_review_id,
             }
         )
@@ -387,6 +379,46 @@ async def _pick_parse_path(chat_id: str, text: str, *, dry_run: bool = False) ->
 # ===========================================================================
 
 
+def _gather_coach_inputs(
+    session: Session,
+    review: PendingReview,
+    user_text: str,
+) -> tuple[str, list[TutorLesson]]:
+    """Gather coach-pass inputs and render the user prompt.
+
+    Looks up the ``LeetCodeProblem`` row for ``review.problem_slug`` (url /
+    difficulty / tags), gathers active ``TutorLesson`` rows (for the prompt's
+    ``active_lessons_json`` field AND for the downstream ``_lesson_decision``),
+    and renders ``COACH_PROMPT``. Returns ``(user_prompt, active_lessons)``.
+
+    Extracted from ``_coach_pass_path`` so the terminal simulator
+    (``scripts/terminal.py``) can render the exact same prompt for
+    ``:prompt coach`` / ``:llm coach`` without duplicating the format call.
+    """
+    problem = session.get(LeetCodeProblem, review.problem_slug)
+    active_lessons = session.exec(
+        select(TutorLesson).where(TutorLesson.active == True)  # noqa: E712
+    ).all()
+
+    problem_url = problem.url if problem is not None else ""
+    difficulty = problem.difficulty if problem is not None else "unknown"
+    tags = problem.tags if problem is not None else ""
+
+    active_lessons_json = json.dumps(
+        [les.model_dump() for les in active_lessons], indent=2, default=str
+    )
+
+    user_prompt = COACH_PROMPT.format(
+        problem_title=review.problem_title,
+        problem_url=problem_url,
+        difficulty=difficulty,
+        tags=tags,
+        user_text=user_text,
+        active_lessons_json=active_lessons_json,
+    )
+    return user_prompt, active_lessons
+
+
 async def _coach_pass_path(
     chat_id: str,
     inbound_message_id: int,
@@ -406,30 +438,8 @@ async def _coach_pass_path(
     ``(CoachResult, LessonOutcome, reply_text)`` so callers (admin API, tests)
     can inspect the full output without scraping Telegram.
     """
-    # Gather inputs: problem metadata + active lessons.
     with next(get_session()) as session:
-        problem = session.get(LeetCodeProblem, review.problem_slug)
-        active_lessons = session.exec(
-            select(TutorLesson).where(TutorLesson.active == True)  # noqa: E712
-        ).all()
-
-    problem_title = review.problem_title
-    problem_url = problem.url if problem is not None else ""
-    difficulty = problem.difficulty if problem is not None else "unknown"
-    tags = problem.tags if problem is not None else ""
-
-    active_lessons_json = json.dumps(
-        [les.model_dump() for les in active_lessons], indent=2, default=str
-    )
-
-    user_prompt = COACH_PROMPT.format(
-        problem_title=problem_title,
-        problem_url=problem_url,
-        difficulty=difficulty,
-        tags=tags,
-        user_text=user_text,
-        active_lessons_json=active_lessons_json,
-    )
+        user_prompt, active_lessons = _gather_coach_inputs(session, review, user_text)
 
     log.info(
         "flow_b_coach_call",
@@ -628,21 +638,17 @@ async def _post_coach_updates(
     lesson_outcome: LessonOutcome,
     dry_run: bool = False,
 ) -> str:
-    """Apply the five ordered side effects after a coach pass (FR-2.7).
+    """Apply the four ordered side effects after a coach pass (FR-2.7).
 
     1. Insert leetcode_log row (full schema, incl. lesson_title if fired).
     2. If solved → set leetcode_problems.solved = true.
-    3. mark_complete(task_id, notes_append=tutor_feedback) — APPEND (BUG-2).
-    4. Update pending_review.status = done.
-    5. Telegram reply: short confirmation + coach feedback, naming the
+    3. Update pending_review.status = done.
+    4. Telegram reply: short confirmation + coach feedback, naming the
        lesson outcome.
 
-    When ``dry_run`` is True, step 5 (Telegram reply) is skipped but all DB
-    writes and the Google Task update still happen. Returns the reply text
-    that would have been sent (useful for admin API / tests).
-
-    `GoogleAuthExpiredError` from step 3 is re-raised (the webhook's global
-    catch routes it to the distinct #008 alert — it's already a typed error).
+    When ``dry_run`` is True, step 4 (Telegram reply) is skipped but all DB
+    writes still happen. Returns the reply text that would have been sent
+    (useful for admin API / tests).
     """
     today = datetime.date.today()
 
@@ -671,11 +677,7 @@ async def _post_coach_updates(
                 session.add(problem)
                 session.commit()
 
-    # Step 3: mark_complete with notes_append (BUG-2 fix — append, not replace).
-    # GoogleAuthExpiredError propagates to the webhook's global catch → alert.
-    await mark_complete(review.google_task_id, notes_append=result.tutor_feedback)
-
-    # Step 4: update pending_review.status = done.
+    # Step 3: update pending_review.status = done.
     with next(get_session()) as session:
         row = session.get(PendingReview, review.id)
         if row is not None:
@@ -683,10 +685,18 @@ async def _post_coach_updates(
             session.add(row)
             session.commit()
 
-    # Step 5: Telegram reply with confirmation + coach feedback, naming the
+    # Step 4: Telegram reply with confirmation + coach feedback, naming the
     # lesson outcome (saved / reinforced / retired).
+    # `tutor_feedback` is plain text from the LLM (docs/telegram-formatting.md
+    # §3.2.3) — html.escape it before sending as HTML. The footer is built
+    # in code (already escaped). Wrap the feedback in <blockquote> for visual
+    # grouping; the footer goes outside as an italic line.
     footer = _lesson_footer(lesson_outcome)
-    reply_text = f"{result.tutor_feedback}\n\n{footer}" if footer else result.tutor_feedback
+    escaped_feedback = html.escape(result.tutor_feedback)
+    if footer:
+        reply_text = f"<blockquote>{escaped_feedback}</blockquote>\n\n<i>{footer}</i>"
+    else:
+        reply_text = f"<blockquote>{escaped_feedback}</blockquote>"
     if not dry_run:
         await send_reply(chat_id, inbound_message_id, reply_text, parse_mode="HTML")
 

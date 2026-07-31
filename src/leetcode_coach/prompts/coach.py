@@ -55,7 +55,7 @@ If an existing active lesson matches (by title similarity or same category + sam
 If an existing active lesson has times_reinforced >= 5 AND the student demonstrated it correctly this time, set lesson_should_graduate=true. The coach feedback should say: "Retiring lesson: <title> — you've demonstrated this pattern consistently."
 
 Output JSON with these fields:
-- tutor_feedback: HTML-formatted coaching feedback for the user (all 5 sections above). If a lesson was saved, end with: 'Saved lesson: <b><lesson title></b>.' If reinforced: 'Reinforcing lesson: <b><lesson title></b> (Nth time).' If graduated: 'Retiring lesson: <b><lesson title></b> — demonstrated consistently.'
+- tutor_feedback: plain-text coaching feedback for the user (all 5 sections above). Do NOT include any HTML tags. Do NOT include the lesson footer ('Saved lesson:', 'Reinforcing lesson:', 'Retiring lesson:') — the system appends it from the lesson decision fields below. Emit plain text only; the system wraps it in HTML and escapes special characters.
 - lesson_title: short title if a new lesson surfaced, else empty string
 - lesson_category: short category slug (binary-search, dp, graphs, two-pointers, hash-map, heap, backtracking, greedy, design). Empty string if no lesson.
 - lesson_is_recurring: true if this matches an existing active lesson, else false
@@ -72,7 +72,7 @@ Return ONLY the JSON object. No prose. No markdown code fences."""
 # The LLM returns a single JSON object with exactly these top-level keys:
 #
 #   {
-#     "tutor_feedback": "<HTML string, 5 sections + lesson footer>",
+#     "tutor_feedback": "<plain-text string, 5 sections, NO HTML, NO footer>",
 #     "lesson_title": "<short title or empty string>",
 #     "lesson_category": "<slug or empty string>",
 #     "lesson_is_recurring": <bool>,
@@ -81,6 +81,13 @@ Return ONLY the JSON object. No prose. No markdown code fences."""
 #     "status": "solved" | "reviewed" | "skipped" | "saw_solution",
 #     "next_step": "<one concrete recommendation>"
 #   }
+#
+# Rendering decision (docs/telegram-formatting.md §3.2.3): `tutor_feedback`
+# is plain text, NOT HTML. The code html.escape()s it and wraps it in
+# <blockquote>; the lesson footer is built in code from the lesson decision
+# fields (already escaped). The previous contract had the LLM emit HTML,
+# which was not escaped before sending — a latent bug if the LLM reviewed
+# code containing `<`, `>`, or `&`.
 #
 # Defensive validation in #024 enforces:
 #   - all 8 keys present

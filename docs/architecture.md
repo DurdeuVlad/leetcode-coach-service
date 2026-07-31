@@ -13,9 +13,9 @@ runtime for an always-on single-user automation:
 - **Documented n8n bugs in exactly the features this system depends on** —
   Fallback Model + Retry On Fail interaction loops indefinitely (n8n #18797);
   Fallback Model required even when unwanted in older versions (#17140).
-- **Error handling the README asks for** (typed `invalid_grant` branch, no
+- **Error handling the README asks for** (typed branches, no
   "log with estimated defaults") is fiddly per-node in n8n and trivial in
-  Python with `except GoogleAuthError`.
+  Python with typed exceptions.
 - **The Data Table is vendor lock-in** for 4 simple relational shapes.
 - **No tests, no type checking, no real diffs** in n8n JSON.
 
@@ -32,10 +32,9 @@ mechanical.
 | Scheduler | APScheduler (AsyncIO scheduler) | daily 09:05 + 05:05 cron; in-process, no extra container |
 | Telegram | `python-telegram-bot` v21+ | handles webhook setup, update parsing, typed `Update` objects |
 | LLM | OpenAI SDK + Google GenAI SDK | primary `gpt-5.6-sol`, fallback `gemini-3.6-flash`; explicit fallback logic (no n8n Fallback Model bugs) |
-| Google Tasks | `httpx` + google-api-python-client | only needs create + update; OAuth2 refresh-token flow |
 | DB | PostgreSQL (Coolify-managed) | relational, portable, queryable; one connection string |
 | DB layer | SQLModel (SQLAlchemy + Pydantic) | typed models, same types in API + DB; migrations via Alembic |
-| HTTP | `httpx` | async, used for LeetCode GraphQL + Google Tasks + YouTube |
+| HTTP | `httpx` | async, used for LeetCode GraphQL + YouTube |
 | Retries | `tenacity` | typed retry policies per call site |
 | Config | `pydantic-settings` | env-var backed, typed, fails fast on missing secrets |
 | Tests | pytest + pytest-asyncio + respx | mocked LLM/HTTP for the coach pass; real Postgres via testcontainers for DB |
@@ -67,7 +66,6 @@ leetcode-coach-service/
 │       │   ├── __init__.py
 │       │   ├── telegram.py      # webhook setup, send_message, send_reply
 │       │   ├── llm.py           # OpenAI primary + Gemini fallback, typed responses
-│       │   ├── google_tasks.py  # create, update, mark complete; invalid_grant handling
 │       │   ├── leetcode.py      # GraphQL pull (weekly refresh)
 │       │   └── youtube.py       # YouTube Data API search (optional, v1)
 │       ├── flows/
@@ -93,7 +91,6 @@ leetcode-coach-service/
 │   ├── test_flow_b.py
 │   ├── test_expiry.py
 │   ├── test_llm_fallback.py
-│   ├── test_google_auth_branch.py
 │   └── test_admin.py
 ├── docs/
 │   ├── business-requirements.md
@@ -115,7 +112,6 @@ flowchart LR
     APP --> DB[("Postgres<br/>Coolify")]
     APP --> LLM["OpenAI<br/>primary"]
     APP --> LLMF["Gemini<br/>fallback"]
-    APP --> GT["Google Tasks<br/>REST"]
     APP --> BL["Browserless<br/>(homelab)"] --> LC["LeetCode<br/>GraphQL"]
     APP --> SX["SearXNG<br/>(homelab)"] --> YT["YouTube search"]
     APP --> TG_OUT["Telegram<br/>sendMessage"]
@@ -177,31 +173,18 @@ Key properties:
 - The coach pass and the propose pass share the same `LLMClient`. The prompts
   differ; the client doesn't care.
 
-## 6. Google Tasks client and the `invalid_grant` branch
+## 6. Google Tasks integration — not ported
 
-```python
-# src/leetcode_coach/integrations/google_tasks.py (sketch)
-class GoogleTasksClient:
-    async def mark_complete(self, task_id: str, notes_append: str) -> None:
-        try:
-            ...  # get + update call
-        except RefreshError as e:
-            if "invalid_grant" in str(e):
-                raise GoogleAuthExpiredError() from e
-            raise
-```
-
-`GoogleAuthExpiredError` is caught at the flow level and routed to a **distinct
-Telegram alert** ("Google auth expired — re-authenticate the Google credential"),
-per NFR-1 layer 2. It does **not** propagate to the global handler, and the
-coach pass is **never** told to "log with estimated defaults" — that
-anti-pattern from the old Discord workflow is explicitly forbidden.
-
-**Ops note:** the root cause of repeated `invalid_grant` is the GCP OAuth
-consent screen being in `Testing` status, which hard-expires refresh tokens
-at 7 days. The fix is to flip the consent screen to `In production` (single-user
-personal use, no verification needed). Documented in
-`n8n-reference/README.md` lines 325-353 — that guidance carries over unchanged.
+The original n8n v3 workflow mirrored each chosen problem into Google
+Tasks via GCP OAuth, and included a typed `invalid_grant` branch that
+surfaced a distinct "re-authenticate the Google credential" Telegram
+alert. **That integration is not ported to the Python app** (see
+`business-requirements.md` §8 decision 5): it added an external API
+surface and an OAuth refresh-token flow whose 7-day expiry was a
+recurring source of manual re-auth, for no user-facing value. Coach
+feedback is delivered via the Telegram reply instead. The original
+behavior is preserved in `n8n-reference/workflows/flow-b-telegram-and-coach.json`
+for the historical record.
 
 ## 7. Database schema (SQLModel)
 
@@ -240,10 +223,6 @@ TELEGRAM_CHAT_ID=              # the allowlist (single chat)
 TELEGRAM_WEBHOOK_URL=          # public URL Telegram will POST to
 OPENAI_API_KEY=
 GEMINI_API_KEY=
-GOOGLE_CLIENT_ID=               # OPTIONAL — blank = Google Tasks disabled (§8 #5)
-GOOGLE_CLIENT_SECRET=           # OPTIONAL — blank = disabled
-GOOGLE_REFRESH_TOKEN=           # OPTIONAL — blank = disabled
-GOOGLE_TASKS_LIST_ID=           # OPTIONAL — blank = disabled
 SEARXNG_URL=                   # homelab SearXNG JSON endpoint (YouTube search)
 BROWSERLESS_URL=               # homelab Browserless /function endpoint (LeetCode GraphQL)
 LEETCODE_USERNAME=

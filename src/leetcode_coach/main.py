@@ -80,11 +80,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         openai_api_key="set" if settings.openai_api_key else "empty",
         openai_mock_mode=settings.openai_api_key.lower() == "mock",
         gemini_api_key="set" if settings.gemini_api_key else "empty",
-        google_tasks_enabled=bool(
-            settings.google_client_id
-            and settings.google_client_secret
-            and settings.google_refresh_token
-        ),
         admin_api_enabled=bool(settings.admin_api_key),
         browserless_url=settings.browserless_url or None,
         searxng_url=settings.searxng_url or None,
@@ -142,7 +137,7 @@ async def log_requests(request: Request, call_next):  # type: ignore[no-untyped-
 
     Skips ``/health`` to avoid log spam from Coolify's health probe.
     """
-    if request.url.path == "/health":
+    if request.url.path in ("/health", "/health/deep"):
         return await call_next(request)
     start = time.monotonic()
     status_code: int | None = None
@@ -167,7 +162,12 @@ async def log_requests(request: Request, call_next):  # type: ignore[no-untyped-
 
 @app.get("/health")
 async def health(response: Response) -> dict[str, str]:
-    """200 iff DB reachable; scheduler field reports running/not_started."""
+    """Lightweight liveness probe — DB + scheduler only.
+
+    Coolify pings this every few seconds, so it must be cheap: no external
+    HTTP calls. Use ``/health/deep`` for the full external-service probes.
+    200 iff DB reachable + scheduler running.
+    """
     db_ok = True
     try:
         with engine.connect() as conn:
@@ -181,4 +181,41 @@ async def health(response: Response) -> dict[str, str]:
         "status": "ok" if (db_ok and sched_ok) else "degraded",
         "db": "reachable" if db_ok else "unreachable",
         "scheduler": "running" if sched_ok else "not_started",
+    }
+
+
+@app.get("/health/deep")
+async def health_deep(response: Response) -> dict[str, object]:
+    """Full diagnostic probe — DB + scheduler + every external service.
+
+    Runs the cheapest possible authenticated round-trip per integration
+    (Telegram getMe, OpenAI 1-token completion, etc.). Mock and disabled
+    services are reported as such — they are not probed. A probe failure
+    never flips the HTTP status; it only surfaces in the payload so an
+    operator can see which integration is down without grepping logs.
+
+    Use this for on-demand diagnostics, not for Coolify's liveness pings
+    (that would rate-limit external APIs). The terminal ``:ping`` command
+    calls the same ``ping_all()`` function.
+    """
+    db_ok = True
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+    except Exception:
+        db_ok = False
+
+    sched_ok = is_running()
+    response.status_code = 200 if (db_ok and sched_ok) else 503
+
+    from leetcode_coach.integrations.connectivity import ping_all
+
+    probes = await ping_all()
+    services = {r.name: {"status": r.status, "detail": r.detail} for r in probes}
+
+    return {
+        "status": "ok" if (db_ok and sched_ok) else "degraded",
+        "db": "reachable" if db_ok else "unreachable",
+        "scheduler": "running" if sched_ok else "not_started",
+        "services": services,
     }

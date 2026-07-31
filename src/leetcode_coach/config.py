@@ -40,24 +40,12 @@ class Settings(BaseSettings):
 
     # LLM
     openai_api_key: str = Field(..., description="OpenAI API key (primary model)")
+    openai_model: str = Field(
+        "gpt-5.6-sol", description="OpenAI model name (primary, architecture.md §2)"
+    )
     gemini_api_key: str = Field(..., description="Google Gemini API key (fallback model)")
-
-    # Google Tasks — OPTIONAL per the 2026-07-28 decision to discontinue GCP
-    # OAuth for v1 (docs/business-requirements.md §8 #5). When all four are
-    # empty, google_tasks.py runs in mock mode: create_task returns synthetic
-    # IDs, mark_complete/update_task are no-ops. The flows still work; the
-    # coach feedback is delivered via Telegram reply instead of Google Task notes.
-    google_client_id: str = Field(
-        "", description="GCP OAuth client id — leave blank to disable Google Tasks"
-    )
-    google_client_secret: str = Field(
-        "", description="GCP OAuth client secret — leave blank to disable"
-    )
-    google_refresh_token: str = Field(
-        "", description="GCP OAuth refresh token — leave blank to disable"
-    )
-    google_tasks_list_id: str = Field(
-        "", description="Task list id — leave blank to disable Google Tasks"
+    gemini_model: str = Field(
+        "gemini-3.6-flash", description="Gemini model name (fallback, architecture.md §2)"
     )
 
     # YouTube search via SearXNG (homelab) — primary YouTube search path
@@ -69,9 +57,13 @@ class Settings(BaseSettings):
 
     # Browserless (homelab) — primary path for LeetCode GraphQL (per
     # docs/business-requirements.md §8 #4). If absent, GraphQL calls raise
-    # LeetCodeFetchError immediately.
+    # LeetCodeFetchError immediately. For Browserless Cloud, set
+    # BROWSERLESS_TOKEN too — it's appended as `?token=...` to the URL.
     browserless_url: str = Field(
         "", description="Base URL of Browserless, e.g. https://browserless.example.com"
+    )
+    browserless_token: str = Field(
+        "", description="Browserless Cloud API token — leave blank for homelab (no auth)"
     )
 
     # LeetCode

@@ -1,22 +1,18 @@
-"""Flow B tests (#027) — routing, pick-parse, coach pass, golden double-gate,
-BUG-2 regression.
+"""Flow B tests (#027) — routing, pick-parse, coach pass, golden double-gate.
 
 Covers every FR-2 sub-requirement:
 - FR-2.2 routing: reply-to per-problem id → coach; reply-to 5-list id →
   pick-parse; no-reply single fuzzy → coach; zero/multiple → clarify + no
   state change.
-- FR-2.3/2.4 pick-parse: "2 5" → 2 msgs/2 tasks/2 rows; cap at 2; empty →
+- FR-2.3/2.4 pick-parse: "2 5" → 2 msgs/2 rows; cap at 2; empty →
   "no valid picks" + zero rows.
-- FR-2.5/2.7 coach path: all five post-coach updates happen in order.
+- FR-2.5/2.7 coach path: all four post-coach updates happen in order.
 - FR-2.6 golden double-gate: coach says graduate but DB count = 4 → bump,
   not graduate; count ≥ 5 → retire. The DB count is the source of truth,
   never the coach (AGENTS.md gotcha #4).
-- BUG-2 (FR-2.7 step 3): mark_complete called with notes_append and prior
-  notes preserved (not replaced).
 - Status notes: "skipped" logs status only.
 
 The golden double-gate test MUST FAIL if the DB-count gate is removed.
-The BUG-2 test MUST FAIL if notes are replaced instead of appended.
 Tests that can't fail on the bug they guard are theatre (#034).
 """
 
@@ -147,7 +143,6 @@ def _insert_pending_review(
     problem_slug: str = "problem-1",
     problem_title: str = "Problem 1",
     status: str = "open",
-    google_task_id: str = "task-1",
 ) -> db_models.PendingReview:
     today = datetime.date.today()
     with Session(engine) as session:
@@ -165,7 +160,6 @@ def _insert_pending_review(
             )
         row = db_models.PendingReview(
             message_id=message_id,
-            google_task_id=google_task_id,
             problem_slug=problem_slug,
             problem_title=problem_title,
             proposed_at=today,
@@ -178,9 +172,15 @@ def _insert_pending_review(
 
 
 def _coach_json(**overrides) -> dict:
-    """A valid coach LLM JSON response. Override fields per-test."""
+    """A valid coach LLM JSON response. Override fields per-test.
+
+    Per docs/telegram-formatting.md §3.2.3, `tutor_feedback` is PLAIN TEXT
+    (no HTML). The code html.escape()s it and wraps it in <blockquote>
+    before sending. The lesson footer is built in code from the lesson
+    decision fields.
+    """
     base = {
-        "tutor_feedback": "<b>Correctness:</b> works.\n<b>Next step:</b> try harder.",
+        "tutor_feedback": "Correctness: works.\nNext step: try harder.",
         "lesson_title": "",
         "lesson_category": "",
         "lesson_is_recurring": False,
@@ -326,13 +326,11 @@ async def test_route_non_text_update_silently_dropped(sqlite_session_factory):
 
 @pytest.mark.asyncio
 async def test_pick_parse_two_picks_creates_two_threads(sqlite_session_factory):
-    """'2 5' → 2 per-problem messages, 2 google tasks, 2 pending_review rows."""
+    """'2 5' → 2 per-problem messages, 2 pending_review rows."""
     _insert_daily_candidates(sqlite_session_factory, count=5)
     msg_ids = iter([100, 200])
-    task_ids = iter(["task-A", "task-B"])
 
     sent_msgs = []
-    created_tasks = []
 
     async def _fake_send(chat_id, text, **kwargs):
         # Per-problem thread messages must be sent with parse_mode="HTML"
@@ -344,22 +342,27 @@ async def test_pick_parse_two_picks_creates_two_threads(sqlite_session_factory):
         sent_msgs.append((mid, text))
         return mid
 
-    async def _fake_create_task(title, notes, due):
-        tid = next(task_ids)
-        created_tasks.append((tid, title, notes, due))
-        return tid
-
-    with (
-        patch.object(flow_b, "send_message", AsyncMock(side_effect=_fake_send)),
-        patch.object(flow_b, "create_task", AsyncMock(side_effect=_fake_create_task)),
-    ):
+    with patch.object(flow_b, "send_message", AsyncMock(side_effect=_fake_send)):
         await flow_b._pick_parse_path(123456, "2 5")
 
     assert len(sent_msgs) == 2
-    assert len(created_tasks) == 2
-    # FR-2.4 order: message → task → row. Verify message went out first per pick.
+    # FR-2.4 order: message → row. Verify message went out first per pick.
     assert "Problem 1/2" in sent_msgs[0][1]
     assert "Problem 2/2" in sent_msgs[1][1]
+    # Phase 9: per-problem thread uses hyperlink + difficulty badge shape
+    # (docs/telegram-formatting.md §3.2.2). The title is wrapped in <a href>
+    # pointing at the LeetCode URL, and a colored emoji badge precedes the
+    # difficulty word.
+    for _, text in sent_msgs:
+        assert '<a href="https://leetcode.com/problems/' in text
+        assert "</a>" in text
+        assert text.count("🟢") + text.count("🟡") + text.count("🔴") == 1
+        assert "<blockquote>" in text  # coaching hint wrapped in blockquote
+    # No MarkdownV2 escape artifacts should leak (regression for the
+    # user-reported bug, docs/telegram-formatting.md §1).
+    for _, text in sent_msgs:
+        assert "\\." not in text
+        assert "\\-" not in text
 
     # Verify 2 pending_review rows with the captured ids.
     with Session(sqlite_session_factory) as session:
@@ -368,7 +371,6 @@ async def test_pick_parse_two_picks_creates_two_threads(sqlite_session_factory):
         ).all()
     assert len(rows) == 2
     assert {r.message_id for r in rows} == {100, 200}
-    assert {r.google_task_id for r in rows} == {"task-A", "task-B"}
     assert all(r.status == "open" for r in rows)
 
 
@@ -383,10 +385,7 @@ async def test_pick_parse_caps_at_two(sqlite_session_factory):
         sent.append(text)
         return mid
 
-    with (
-        patch.object(flow_b, "send_message", AsyncMock(side_effect=_fake_send)),
-        patch.object(flow_b, "create_task", AsyncMock(return_value="t")),
-    ):
+    with patch.object(flow_b, "send_message", AsyncMock(side_effect=_fake_send)):
         await flow_b._pick_parse_path(123456, "2 3 4 5")
 
     assert len(sent) == 2  # capped
@@ -398,15 +397,13 @@ async def test_pick_parse_empty_reply_sends_no_valid_picks(sqlite_session_factor
     _insert_daily_candidates(sqlite_session_factory)
     sent = []
 
-    with (
-        patch.object(flow_b, "send_message", AsyncMock(side_effect=lambda c, t: sent.append(t))),
-        patch.object(flow_b, "create_task", AsyncMock()) as create_mock,
+    with patch.object(
+        flow_b, "send_message", AsyncMock(side_effect=lambda c, t: sent.append(t))
     ):
         await flow_b._pick_parse_path(123456, "hello world")
 
     assert len(sent) == 1
     assert "No valid picks" in sent[0]
-    create_mock.assert_not_called()
     with Session(sqlite_session_factory) as session:
         rows = session.exec(select(db_models.PendingReview)).all()
     assert len(rows) == 0
@@ -416,13 +413,11 @@ async def test_pick_parse_empty_reply_sends_no_valid_picks(sqlite_session_factor
 async def test_pick_parse_no_candidates_sends_hint(sqlite_session_factory):
     """No daily_candidates persisted today → fail-loud hint, no rows."""
     sent = []
-    with (
-        patch.object(flow_b, "send_message", AsyncMock(side_effect=lambda c, t: sent.append(t))),
-        patch.object(flow_b, "create_task", AsyncMock()) as create_mock,
+    with patch.object(
+        flow_b, "send_message", AsyncMock(side_effect=lambda c, t: sent.append(t))
     ):
         await flow_b._pick_parse_path(123456, "1 2")
     assert any("No candidate list" in s for s in sent)
-    create_mock.assert_not_called()
 
 
 # ===========================================================================
@@ -431,15 +426,14 @@ async def test_pick_parse_no_candidates_sends_hint(sqlite_session_factory):
 
 
 @pytest.mark.asyncio
-async def test_coach_path_runs_five_steps_in_order(sqlite_session_factory):
-    """FR-2.7: all five post-coach updates happen in order:
+async def test_coach_path_runs_four_steps_in_order(sqlite_session_factory):
+    """FR-2.7: all four post-coach updates happen in order:
     1. leetcode_log row
     2. leetcode_problems.solved = true (if solved)
-    3. mark_complete(notes_append=...) — BUG-2 append
-    4. pending_review.status = done
-    5. Telegram reply
+    3. pending_review.status = done
+    4. Telegram reply
     """
-    review = _insert_pending_review(sqlite_session_factory, message_id=50, google_task_id="task-X")
+    review = _insert_pending_review(sqlite_session_factory, message_id=50)
     update = _make_update(text="def two_sum(): ...", reply_to_message_id=50)
 
     call_order: list[str] = []
@@ -453,23 +447,13 @@ async def test_coach_path_runs_five_steps_in_order(sqlite_session_factory):
             tokens_out=0,
         )
 
-    async def _spy_mark_complete(task_id, notes_append=None):
-        call_order.append("mark_complete")
-        # Verify BUG-2: notes_append is the feedback (not None, not replace).
-        assert task_id == "task-X"
-        assert notes_append and "Correctness" in notes_append
-        # Do NOT call the real mark_complete — GOOGLE_CLIENT_ID=dummy means
-        # _is_mock() is False, so it would try to hit the real API. The
-        # append-vs-replace behavior is google_tasks' responsibility and has
-        # its own test; Flow B's responsibility is to CALL mark_complete
-        # with notes_append (verified above).
-
     sent_replies = []
 
     async def _spy_send_reply(chat_id, reply_to, text, **kwargs):
         call_order.append("reply")
-        # Coach reply must be sent with parse_mode="HTML" (the coach prompt
-        # emits HTML-formatted feedback with <b> tags for the lesson footer).
+        # Coach reply must be sent with parse_mode="HTML" (Phase 9: the
+        # plain-text tutor_feedback is html.escape'd and wrapped in
+        # <blockquote>; the lesson footer is built in code as <i>...</i>).
         assert (
             kwargs.get("parse_mode") == "HTML"
         ), f"coach reply must use parse_mode=HTML, got {kwargs.get('parse_mode')!r}"
@@ -477,7 +461,6 @@ async def test_coach_path_runs_five_steps_in_order(sqlite_session_factory):
 
     with (
         patch.object(flow_b, "LLMClient") as LLMCls,
-        patch.object(flow_b, "mark_complete", _spy_mark_complete),
         patch.object(flow_b, "send_reply", AsyncMock(side_effect=_spy_send_reply)),
         patch.object(flow_b, "send_message", AsyncMock()),
     ):
@@ -492,55 +475,168 @@ async def test_coach_path_runs_five_steps_in_order(sqlite_session_factory):
         # Verify leetcode_problems.solved = true (step 2).
         prob = session.get(db_models.LeetCodeProblem, review.problem_slug)
         assert prob.solved is True
-        # Verify pending_review.status = done (step 4).
+        # Verify pending_review.status = done (step 3).
         pr = session.exec(
             select(db_models.PendingReview).where(db_models.PendingReview.message_id == 50)
         ).first()
         assert pr.status == "done"
 
-    # Step 5: reply sent with the coach feedback.
+    # Step 4: reply sent with the coach feedback.
     assert len(sent_replies) == 1
-    assert "Correctness" in sent_replies[0]
+    reply = sent_replies[0]
+    assert "Correctness" in reply
+    # Phase 9: the plain-text tutor_feedback is wrapped in <blockquote>.
+    assert "<blockquote>" in reply
+    assert "</blockquote>" in reply
+    # No lesson fired in this case (lesson_title=""), so no <i> footer.
+    assert "<i>" not in reply
+    # No MarkdownV2 escape artifacts (regression for the user-reported bug).
+    assert "\\." not in reply
+    assert "\\-" not in reply
 
-    # Order: llm → mark_complete → reply. (log/problem/pending_review are DB
-    # writes interleaved but happen before mark_complete and reply per FR-2.7.)
-    assert call_order.index("llm") < call_order.index("mark_complete")
-    assert call_order.index("mark_complete") < call_order.index("reply")
+    # Order: llm → reply. (log/problem/pending_review are DB writes
+    # interleaved but happen before reply per FR-2.7.)
+    assert call_order.index("llm") < call_order.index("reply")
 
 
 @pytest.mark.asyncio
-async def test_bug2_mark_complete_appends_not_replaces(sqlite_session_factory):
-    """BUG-2 regression: mark_complete must be called with notes_append, and
-    the call must APPEND to existing notes (not replace).
+async def test_coach_reply_escapes_special_chars_in_tutor_feedback(sqlite_session_factory):
+    """Phase 9 regression (docs/telegram-formatting.md §3.2.3): `tutor_feedback`
+    is plain text from the LLM. If it contains `<`, `>`, `&` (e.g., the LLM
+    reviewed code with `if a < b`), the code must html.escape() it before
+    sending as HTML — otherwise the Telegram HTML parser breaks or, worse,
+    the feedback's `<` gets interpreted as a tag.
 
-    This test fails if the flow calls mark_complete without notes_append, or
-    if the google_tasks client replaces notes instead of appending.
+    Also verifies the MarkdownV2 escape leak regression: even when the
+    feedback contains `.`, `-`, `(`, `)`, no backslash-escape artifacts appear.
     """
-    _insert_pending_review(sqlite_session_factory, message_id=50, google_task_id="task-X")
+    _insert_pending_review(sqlite_session_factory, message_id=50)
     update = _make_update(text="my code", reply_to_message_id=50)
 
-    captured: dict = {}
+    # Plain-text feedback with HTML special chars AND MarkdownV2 special chars.
+    raw_feedback = (
+        "Correctness: if a < b then b > a & c.\n"
+        "Bug: off-by-one on arr[i-1].\n"
+        "Next step: handle the (n-1) case."
+    )
 
-    async def _spy_mark_complete(task_id, notes_append=None):
-        captured["task_id"] = task_id
-        captured["notes_append"] = notes_append
+    async def _fake_complete(system, user, **kw):
+        return LLMResponse(
+            text=json.dumps(_coach_json(tutor_feedback=raw_feedback, lesson_title="")),
+            model="mock",
+            tokens_in=0,
+            tokens_out=0,
+        )
+
+    sent_replies = []
+
+    async def _capture_reply(chat_id, reply_to, text, **kwargs):
+        assert kwargs.get("parse_mode") == "HTML"
+        sent_replies.append(text)
 
     with (
         patch.object(flow_b, "LLMClient") as LLMCls,
-        patch.object(flow_b, "mark_complete", _spy_mark_complete),
-        patch.object(flow_b, "send_reply", AsyncMock()),
+        patch.object(flow_b, "send_reply", AsyncMock(side_effect=_capture_reply)),
         patch.object(flow_b, "send_message", AsyncMock()),
     ):
-        LLMCls.return_value.complete = AsyncMock(
-            return_value=LLMResponse(
-                text=json.dumps(_coach_json()), model="mock", tokens_in=0, tokens_out=0
-            )
-        )
+        LLMCls.return_value.complete = AsyncMock(side_effect=_fake_complete)
         await handle_update(update)
 
-    # FR-2.7 step 3: notes_append is the tutor_feedback (BUG-2 fix).
-    assert captured["notes_append"] is not None
-    assert "Correctness" in captured["notes_append"]
+    assert len(sent_replies) == 1
+    reply = sent_replies[0]
+    # The HTML special chars in the feedback must be escaped.
+    assert "a &lt; b" in reply
+    assert "b &gt; a" in reply
+    assert "a &amp; c" in reply
+    # The raw `<`, `>`, `&` from the feedback must NOT appear unescaped
+    # (the only `<`, `>` in the reply should be the HTML tags we add).
+    # Strip our known tags to check the feedback content.
+    import re as _re
+
+    feedback_block = _re.search(r"<blockquote>(.*?)</blockquote>", reply, _re.DOTALL)
+    assert feedback_block is not None, "feedback must be wrapped in <blockquote>"
+    inner = feedback_block.group(1)
+    assert "<" not in inner  # no unescaped `<` inside the blockquote
+    assert ">" not in inner  # no unescaped `>` inside the blockquote
+    # Every `&` in the inner text must be the start of an HTML entity
+    # (&lt;, &gt;, &amp;), not a bare `&`.
+    bare_amp = _re.sub(r"&(?:lt|gt|amp|quot|#\d+);", "", inner)
+    assert "&" not in bare_amp, f"unescaped `&` in feedback: {inner!r}"
+    # No MarkdownV2 escape artifacts.
+    assert "\\." not in reply
+    assert "\\-" not in reply
+    assert "\\(" not in reply
+    assert "\\)" not in reply
+    # The plain-text punctuation must survive unescaped (html.escape only
+    # touches <, >, & — not . - ( )).
+    assert "arr[i-1]" in reply
+    assert "(n-1)" in reply
+
+
+@pytest.mark.asyncio
+async def test_coach_reply_includes_lesson_footer_when_lesson_fires(sqlite_session_factory):
+    """Phase 9 (docs/telegram-formatting.md §3.2.3): when a lesson fires, the
+    reply includes an <i>footer</i> line OUTSIDE the <blockquote>, built in
+    code from the lesson decision fields (saved/reinforced/retired).
+    """
+    # Insert an existing lesson so the reinforce path fires (count 1 → 2).
+    _insert_pending_review(sqlite_session_factory, message_id=50)
+    with Session(sqlite_session_factory) as session:
+        session.add(
+            db_models.TutorLesson(
+                title="off-by-one on inclusive bounds",
+                category="binary-search",
+                times_reinforced=1,
+                active=True,
+            )
+        )
+        session.commit()
+    update = _make_update(text="my code", reply_to_message_id=50)
+
+    async def _fake_complete(system, user, **kw):
+        return LLMResponse(
+            text=json.dumps(
+                _coach_json(
+                    tutor_feedback="good progress.",
+                    lesson_title="off-by-one on inclusive bounds",
+                    lesson_category="binary-search",
+                    lesson_is_recurring=True,
+                    lesson_should_graduate=False,
+                )
+            ),
+            model="mock",
+            tokens_in=0,
+            tokens_out=0,
+        )
+
+    sent_replies = []
+
+    async def _capture_reply(chat_id, reply_to, text, **kwargs):
+        assert kwargs.get("parse_mode") == "HTML"
+        sent_replies.append(text)
+
+    with (
+        patch.object(flow_b, "LLMClient") as LLMCls,
+        patch.object(flow_b, "send_reply", AsyncMock(side_effect=_capture_reply)),
+        patch.object(flow_b, "send_message", AsyncMock()),
+    ):
+        LLMCls.return_value.complete = AsyncMock(side_effect=_fake_complete)
+        await handle_update(update)
+
+    assert len(sent_replies) == 1
+    reply = sent_replies[0]
+    # The feedback is in <blockquote>, the footer is in <i> outside it.
+    assert "<blockquote>" in reply
+    assert "</blockquote>" in reply
+    assert "<i>" in reply
+    assert "</i>" in reply
+    # The footer comes AFTER the blockquote (reinforce message names the lesson).
+    assert reply.index("</blockquote>") < reply.index("<i>")
+    # The lesson title (which contains a hyphen) must appear unescaped in
+    # the footer (it's built in code from a DB row, not LLM output, but the
+    # escape regression must hold for code-built strings too).
+    assert "off-by-one" in reply
+    assert "\\-" not in reply
 
 
 # ===========================================================================
@@ -718,12 +814,11 @@ async def test_status_note_skipped_logs_status_only(sqlite_session_factory):
     The coach prompt handles the branch within the LLM call; we verify the
     parsed status flows through to the leetcode_log row.
     """
-    _insert_pending_review(sqlite_session_factory, message_id=50, google_task_id="task-X")
+    _insert_pending_review(sqlite_session_factory, message_id=50)
     update = _make_update(text="skipped", reply_to_message_id=50)
 
     with (
         patch.object(flow_b, "LLMClient") as LLMCls,
-        patch.object(flow_b, "mark_complete", AsyncMock()),
         patch.object(flow_b, "send_reply", AsyncMock()),
         patch.object(flow_b, "send_message", AsyncMock()),
     ):

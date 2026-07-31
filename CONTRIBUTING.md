@@ -110,7 +110,7 @@ Conventional Commits, lowercase, imperative:
 
 ```
 feat(telegram): add webhook secret_token verification
-fix(google-tasks): append notes instead of replacing (BUG-2)
+fix(flow-b): append coach feedback to telegram reply
 docs(roadmap): mark phase 0 exit criteria met
 test(llm): cover auth-error → no-retry → fallback branch
 chore(deps): bump openai to 1.55.0

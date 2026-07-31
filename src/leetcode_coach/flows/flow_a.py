@@ -18,6 +18,7 @@ needs only the message sent + the BUG-1 regression.
 from __future__ import annotations
 
 import datetime
+import html
 import json
 from collections.abc import Sequence
 
@@ -44,6 +45,11 @@ _REQUIRED_CANDIDATE_KEYS = (
     "coaching_hint",
 )
 _VALID_DIFFICULTIES = ("easy", "medium", "hard")
+
+# Difficulty → emoji badge for the propose card (docs/telegram-formatting.md
+# §3.2.1). Mapped in code, NOT in the prompt — the LLM emits the lowercase
+# difficulty string and the code renders the badge.
+_DIFFICULTY_BADGE = {"easy": "🟢", "medium": "🟡", "hard": "🔴"}
 
 
 class ProposeValidationError(LeetCodeCoachError):
@@ -98,12 +104,16 @@ def _build_prompt(
     )
 
 
-def _parse_candidates(raw_text: str) -> tuple[str, list[dict]]:
-    """Parse the LLM JSON response into (markdown, candidates).
+def _parse_candidates(raw_text: str) -> list[dict]:
+    """Parse the LLM JSON response into the candidates list.
 
     Strips a single pair of markdown code fences if present (some models wrap
     JSON in ```json ... ``` despite the prompt saying not to). Raises
     `ProposeValidationError` on any structural problem.
+
+    The LLM no longer emits a `candidate_list_markdown` field
+    (docs/telegram-formatting.md §3.2.1) — the code renders the HTML card
+    from the `candidates` array via `_render_propose_html`.
     """
     text = raw_text.strip()
     if text.startswith("```"):
@@ -120,13 +130,45 @@ def _parse_candidates(raw_text: str) -> tuple[str, list[dict]]:
 
     if not isinstance(payload, dict):
         raise ProposeValidationError("LLM response top-level was not a JSON object")
-    markdown = payload.get("candidate_list_markdown")
     candidates = payload.get("candidates")
-    if not isinstance(markdown, str) or not markdown.strip():
-        raise ProposeValidationError("missing or empty candidate_list_markdown")
     if not isinstance(candidates, list):
         raise ProposeValidationError("candidates was not a JSON array")
-    return markdown, candidates
+    return candidates
+
+
+def _render_propose_html(candidates: Sequence[dict]) -> str:
+    """Render the 5-candidate propose card as Telegram HTML.
+
+    The LLM emits plain-text fields; this function wraps them in a fixed
+    HTML template with `html.escape` on every LLM-derived string. Sent with
+    `parse_mode="HTML"`. See docs/telegram-formatting.md §3.2.1 for the
+    target shape and the rationale (MarkdownV2 was unreliable; HTML + escape
+    is strictly simpler).
+
+    All LLM-derived strings (`title`, `tags`, `reasoning`, `coaching_hint`)
+    pass through `html.escape`. URLs come from the validated
+    `leetcode.com/problems/<slug>/` shape (enforced by
+    `_validate_candidates`), so they're safe to embed; `html.escape` on the
+    URL too is defensive and harmless.
+    """
+    lines: list[str] = ["<b>📊 Today's Problems</b>", ""]
+    for i, c in enumerate(candidates, start=1):
+        title = html.escape(str(c["title"]))
+        url = html.escape(str(c["url"]), quote=True)
+        tags = html.escape(str(c["tags"]))
+        difficulty = str(c["difficulty"]).lower()
+        badge = _DIFFICULTY_BADGE.get(difficulty, "")
+        reasoning = html.escape(str(c.get("reasoning", "")))
+        hint = html.escape(str(c.get("coaching_hint", "")))
+        lines.append(
+            f'<b>{i}. <a href="{url}">{title}</a></b> {badge} {html.escape(difficulty)}'
+        )
+        lines.append(f"<i>{tags}</i>")
+        lines.append(
+            f"<blockquote><b>Why:</b> {reasoning}\n<b>Hint:</b> {hint}</blockquote>"
+        )
+        lines.append("")
+    return "\n".join(lines).rstrip()
 
 
 def _validate_candidates(candidates: Sequence[dict]) -> None:
@@ -218,15 +260,15 @@ async def propose_5(
     """Run the daily proposal: gather data, call LLM, parse, send to Telegram,
     then persist the 5 candidates for Flow B's pick-parse path (#020).
 
-    Returns the `candidate_list_markdown` that was sent (useful for tests and
-    for #020 to persist alongside the candidates).
+    Returns the HTML card that was sent (useful for tests and for #020 to
+    persist alongside the candidates).
 
     Args:
         llm: injected LLMClient (tests pass a mock; production uses the default).
         chat_id: override the target chat (tests use this; production uses the
             configured TELEGRAM_CHAT_ID via send_message's allowlist default).
         dry_run: skip the Telegram send (admin/test path). Candidates are still
-            persisted so Flow B's pick-parse can run. The markdown is returned
+            persisted so Flow B's pick-parse can run. The HTML is returned
             either way.
 
     Flow (FR-1.6): after sending the single numbered message, the flow ENDS.
@@ -246,24 +288,25 @@ async def propose_5(
 
     user_prompt = _build_prompt(recent_log, unsolved_pool, active_lessons)
     response = await client.complete(PROPOSE_SYSTEM, user_prompt)
-    markdown, candidates = _parse_candidates(response.text)
+    candidates = _parse_candidates(response.text)
     _validate_candidates(candidates)
+    html_card = _render_propose_html(candidates)
 
     if not dry_run:
-        # Plain text send (no parse_mode): the LLM emits MarkdownV2-style
-        # markup, but LeetCode titles routinely contain characters that
-        # MarkdownV2 requires escaped (`-`, `.`, `(`, `)`, `!`). Sending with
-        # parse_mode="MarkdownV2" causes Telegram to reject the message with
-        # "can't parse entities". Phase 9 issue #044 replaces this send with
-        # a card-style HTML message (with html.escape) that renders reliably.
-        await send_message(target_chat, markdown)
+        # HTML send: the code renders the card from the candidates array
+        # (docs/telegram-formatting.md §3.2.1). All LLM-derived strings are
+        # html.escape'd in _render_propose_html. The previous plain-text send
+        # leaked MarkdownV2 escape artifacts (`\.`, `\-`) into the user-facing
+        # message because the LLM was told to emit MarkdownV2 but parse_mode
+        # was omitted (MarkdownV2 rejects on missing escapes).
+        await send_message(target_chat, html_card, parse_mode="HTML")
     # Persist the 5 candidates so Flow B's pick-parse can map reply numbers
     # → problems (issue #020). Done AFTER the send so a send failure doesn't
     # leave stale candidates; a persist failure here is loud (NFR-1 layer 2).
     _persist_candidates(candidates)
     log.info(
         "flow_a_sent",
-        chars=len(markdown),
+        chars=len(html_card),
         model=response.model,
         tokens_in=response.tokens_in,
         tokens_out=response.tokens_out,
@@ -280,4 +323,4 @@ async def propose_5(
         except Exception:
             log.warning("pinned_refresh_failed_after_propose")
 
-    return markdown
+    return html_card

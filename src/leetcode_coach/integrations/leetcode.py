@@ -191,10 +191,16 @@ async def _post(query: str, variables: dict) -> dict:
         )
 
     base = browserless_url.rstrip("/")
+    token = settings.browserless_token
+    function_url = f"{base}/function"
+    if token:
+        # Browserless Cloud expects the token as a query param.
+        sep = "&" if "?" in function_url else "?"
+        function_url = f"{function_url}{sep}token={token}"
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
             resp = await client.post(
-                f"{base}/function",
+                function_url,
                 json={
                     "code": _BROWSERLESS_CODE,
                     "context": {"query": query, "variables": variables},

@@ -49,7 +49,7 @@ so work can be picked up, tracked, and checked off one unit at a time.
 | `type:test` | Test-only or test-heavy work |
 | `type:bug-fix` | Fixes a known n8n-v3 defect ported into the port |
 | `area:db` | SQLModel / Alembic / Postgres |
-| `area:integrations` | Telegram / LLM / Google Tasks / LeetCode / YouTube |
+| `area:integrations` | Telegram / LLM / LeetCode / YouTube |
 | `area:flow-a` `area:flow-b` `area:expiry` `area:refresh` | Flow code |
 | `area:prompts` | Verbatim prompt ports |
 | `area:scheduling` | APScheduler cron |
@@ -63,12 +63,10 @@ so work can be picked up, tracked, and checked off one unit at a time.
 | ID | Bug | Fixed in | Regression test in |
 |---|---|---|---|
 | BUG-1 | Flow A never received the **unsolved** pool (only `solved = true`) | #016 | #018 |
-| BUG-2 | Google Task notes were **replaced** on completion, dropping coach feedback | #026 | #027 |
 
-The three n8n *error-handling* gaps (no retry on Data Table, no typed Google
-auth branch, no Telegram trigger `onError`) are closed "for free" by `tenacity`
-(#010–#013), a typed `GoogleAuthExpiredError` (#011), and a normal FastAPI
-route (#019). No dedicated issues needed.
+The three n8n *error-handling* gaps (no retry on Data Table, no Telegram
+trigger `onError`) are closed "for free" by `tenacity` (#010–#013) and a
+normal FastAPI route (#019). No dedicated issues needed.
 
 ## Dependency graph (high level)
 
@@ -112,7 +110,6 @@ Within phases the sharp edges are:
 - [ ] [#008 — Typed error hierarchy + `send_alert`](issues/008-errors-and-alerts.md)
 - [ ] [#009 — Telegram client](issues/009-telegram-client.md)
 - [ ] [#010 — LLM client (primary + fallback)](issues/010-llm-client.md)
-- [ ] [#011 — Google Tasks client (invalid_grant + notes_append)](issues/011-google-tasks-client.md)
 - [ ] [#012 — LeetCode GraphQL client (+ Browserless stub)](issues/012-leetcode-client.md)
 - [ ] [#013 — YouTube client (optional)](issues/013-youtube-client.md)
 - [ ] [#014 — Integration test suite](issues/014-integration-tests.md)

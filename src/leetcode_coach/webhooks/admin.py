@@ -101,7 +101,6 @@ class PickThreadOut(BaseModel):
     problem_title: str
     difficulty: str
     message_id: int
-    task_id: str
     pending_review_id: int
 
 
@@ -183,9 +182,9 @@ async def admin_pick(
 ) -> PickResponse:
     """Trigger Flow B's pick-parse path without sending to Telegram.
 
-    Creates Google Tasks and ``pending_review`` rows for the picked problems.
-    Returns the created threads (including ``pending_review_id`` for use in a
-    subsequent ``POST /admin/coach`` call).
+    Creates ``pending_review`` rows for the picked problems. Returns the
+    created threads (including ``pending_review_id`` for use in a subsequent
+    ``POST /admin/coach`` call). (Google Tasks creation removed 2026-07-31.)
     """
     _check_admin_key(x_admin_api_key)
     log.info("admin_pick_start", picks=req.picks)
@@ -203,7 +202,6 @@ async def admin_pick(
             problem_title=t["problem_title"],
             difficulty=t["difficulty"],
             message_id=t["message_id"],
-            task_id=t["task_id"],
             pending_review_id=t["pending_review_id"],
         )
         for t in created

@@ -29,8 +29,8 @@ operating rules, and the gotchas you'll hit.
 - **DB:** PostgreSQL via SQLModel + Alembic
 - **LLM:** OpenAI SDK (primary, `gpt-5.6-sol`) + Google GenAI SDK (fallback,
   `gemini-3.6-flash`) — explicit fallback logic, no n8n Fallback Model bugs
-- **Integrations:** Telegram Bot API, Google Tasks API, LeetCode GraphQL,
-  YouTube Data API (optional)
+- **Integrations:** Telegram Bot API, LeetCode GraphQL (via Browserless),
+  YouTube search (via SearXNG)
 - **Deploy:** Docker → Coolify on a homelab
 - **Tests:** pytest, pytest-asyncio, testcontainers-postgres, respx
 
@@ -78,25 +78,22 @@ The n8n audit (see [`docs/roadmap.md`](./docs/roadmap.md) "What we
 explicitly defer") found three classes of problems:
 
 1. **Business-logic bugs.** Flow A's AI Agent was never given the unsolved
-   problem pool to choose from. Flow B's Google Task completion dropped the
-   coach feedback from the task notes.
+   problem pool to choose from.
 2. **Error-handling gaps vs. the spec.** The original README required
-   `retryOnFail` on all AI/Google/Data Table nodes (18 nodes lacked it), a
-   dedicated `invalid_grant` error branch for Google auth (not implemented),
-   and `onError: "Stop Workflow"` on the Telegram Trigger (not set).
+   `retryOnFail` on all AI/Data Table nodes (18 nodes lacked it) and
+   `onError: "Stop Workflow"` on the Telegram Trigger (not set).
 3. **Operational limits.** n8n Cloud's 250-workflow-run/month cap and a
    preference for homelab hosting made a self-hosted Python service the
    lower-friction long-term option.
 
-In Python: retries are default-on via `tenacity`, the Google auth branch is
-a typed exception caught at the call site, and the Telegram webhook is a
-normal FastAPI route with normal error handling. The three error-handling
+In Python: retries are default-on via `tenacity`, and the Telegram webhook
+is a normal FastAPI route with normal error handling. The error-handling
 gaps from the n8n audit close for free.
 
 ## Scope
 
 **In scope (v1):** single user, 3 flows (proposal, reply router + coach
-pass, expiry sweep), weekly LeetCode pool refresh, Telegram + Google Tasks
+pass, expiry sweep), weekly LeetCode pool refresh, Telegram
 + LLM integrations, homelab deploy via Coolify.
 
 **Out of scope (v1):** multi-user, web UI, photo evidence, LLM tool-calling

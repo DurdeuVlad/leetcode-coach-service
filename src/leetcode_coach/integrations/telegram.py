@@ -154,7 +154,8 @@ async def edit_message_text(
     `TelegramError` and creates a new pinned message.
 
     `parse_mode` sets Telegram's formatting mode — ``None`` (default) for
-    plain text, which is what the pinned snapshot uses.
+    plain text, ``"HTML"`` for the pinned progression snapshot
+    (docs/telegram-formatting.md §3.2.4).
 
     The "message is not modified" case (Telegram 400 with that exact
     description) is NOT raised here — it surfaces as a `TelegramError` and

@@ -46,10 +46,6 @@ retries and typed errors. No flow logic yet.
       `send_reply`. Retries on 5xx/timeout.
 - [x] `integrations/llm.py` — `LLMClient` with primary + fallback per
       `architecture.md` §5. Typed `LLMResponse` with `tokens_in`, `tokens_out`.
-- [x] `integrations/google_tasks.py` — `create_task`, `update_task`,
-      `mark_complete` (with `notes_append`, **not** replace — this fixes the
-      n8n bug where notes were dropped on completion). Typed
-      `GoogleAuthExpiredError` on `invalid_grant`.
 - [x] `integrations/leetcode.py` — `refresh_pool()` GraphQL pull via the
       homelab Browserless `/function` endpoint (primary path per the
       2026-07-28 decision — `docs/business-requirements.md` §8 #4).
@@ -60,14 +56,11 @@ retries and typed errors. No flow logic yet.
 - [x] `errors.py` — typed exception hierarchy + `send_alert(message)` that
       posts to Telegram.
 - [x] Tests for each client with `respx` mocks. Specifically:
-      `test_llm_fallback.py` (primary 500 → fallback fires),
-      `test_google_auth_branch.py` (`invalid_grant` → `GoogleAuthExpiredError`
-      → alert message, **not** a generic crash).
+      `test_llm_fallback.py` (primary 500 → fallback fires).
 
-**Exit criteria:** every client has a passing test suite. The Google auth
-branch is verified to send the distinct alert message, not a generic crash.
-✅ Met — 25/25 Phase 1 tests green (`test_telegram`, `test_llm_fallback`,
-`test_google_auth_branch`, `test_leetcode`, `test_youtube`). The
+**Exit criteria:** every client has a passing test suite.
+✅ Met — Phase 1 tests green (`test_telegram`, `test_llm_fallback`,
+`test_leetcode`, `test_youtube`). The
 `test_smoke.py::test_health_ok` failure is a pre-existing Phase 0
 infrastructure test requiring a live Postgres at `localhost:5432`, unrelated
 to Phase 1.
@@ -104,8 +97,9 @@ Full suite: 47/47 green.
 ## Phase 3 — Flow B (reply router + coach pass) (2 sessions)
 
 **Goal:** replying to the 5-list message with "2 5" creates 2 per-problem
-threads + 2 Google Tasks + 2 `pending_review` rows; replying to a per-problem
-message with code triggers the coach pass and closes the loop.
+threads + 2 `pending_review` rows; replying to a per-problem
+message with code triggers the coach pass and closes the loop. (Google
+Tasks removed 2026-07-31 — see `business-requirements.md` §8 decision 5.)
 
 ### Phase 3a — Pick-parse path
 
@@ -122,10 +116,10 @@ message with code triggers the coach pass and closes the loop.
       `pending_review` rows pre-inserted with `status = proposed`. Decide
       in this phase; document the choice.)
 - [x] For each pick: send per-problem Telegram message (capture
-      `message_id`), create Google Task (capture `task_id`), insert
-      `pending_review` row.
-- [x] Tests: `test_flow_b.py` pick-parse path with mocked Telegram + Google
-      Tasks. Asserts 2 messages, 2 tasks, 2 rows.
+      `message_id`), insert `pending_review` row. (Google Task creation
+      removed 2026-07-31.)
+- [x] Tests: `test_flow_b.py` pick-parse path with mocked Telegram.
+      Asserts 2 messages, 2 rows.
 
 ### Phase 3b — Coach pass path
 
@@ -141,19 +135,17 @@ message with code triggers the coach pass and closes the loop.
 - [x] Post-coach updates:
       1. Insert `leetcode_log` row.
       2. If solved → mark `leetcode_problems.solved = true`.
-      3. **Fix the n8n bug:** `google_tasks.mark_complete(task_id,
-         notes_append=tutor_feedback)` — append, don't replace.
-      4. Update `pending_review.status = done`.
-      5. Send Telegram confirmation naming any lesson saved/reinforced/retired.
+      3. Update `pending_review.status = done`.
+      4. Send Telegram confirmation naming any lesson saved/reinforced/retired.
 - [x] Tests: `test_flow_b.py` coach path with mocked LLM returning a canned
-      coach response. Asserts all 5 post-coach updates happen in order.
+      coach response. Asserts all post-coach updates happen in order.
       Golden-output test for the lesson-decision double gate (coach says
       graduate but DB count is 4 → bump, not graduate).
 
 **Exit criteria:** end-to-end local test — send a fake "2 5" reply → 2
 per-problem messages appear → reply to one with fake code → coach feedback
 appears → DB shows `pending_review.status = done`, `leetcode_log` row
-inserted, Google Task marked complete with feedback in notes.
+inserted.
 
 ## Phase 4 — Expiry sweep (0.5 session)
 
@@ -162,15 +154,13 @@ summary.
 
 - [x] `flows/expiry.py` — `sweep_expired()`:
       1. Select today's `pending_review` where `status = open`.
-      2. For each: set `status = expired`, update Google Task notes with
-         "Expired without reply on <date>" (don't delete).
+      2. For each: set `status = expired`.
       3. Send one Telegram summary message.
 - [x] APScheduler job for `5 5 * * *`.
 - [x] Tests: `test_expiry.py` with 0, 1, and 2 open rows.
 
 **Exit criteria:** manually trigger `sweep_expired()` with 2 open rows in
-the DB → both marked expired, Google Tasks updated, one summary message
-sent.
+the DB → both marked expired, one summary message sent.
 
 ## Phase 5 — Weekly LeetCode refresh (0.5 session)
 
@@ -193,7 +183,6 @@ the next morning.
 - [ ] Coolify: create Postgres service, note the connection string.
 - [ ] Coolify: create app service from the repo, set all env vars from
       `.env.example`, set `DATABASE_URL` to the Postgres service.
-      **Google Tasks vars left blank** (disabled per §8 #5).
 - [ ] First deploy: `alembic upgrade head` runs on startup.
 - [ ] Verify `/health` is 200 from the public URL.
 - [ ] Verify Telegram `setWebhook` succeeded (the app logs the response).
@@ -214,12 +203,6 @@ next day. All four tables have real rows. Cost log shows <$0.20 for the day.
 - [x] ~~If LeetCode GraphQL blocks the homelab IP → wire Browserless fallback.~~
       **Resolved 2026-07-28:** Browserless is now the primary (and only)
       path for LeetCode GraphQL (§8.4).
-- [x] ~~If Google Tasks causes more ops pain than value → consider dropping
-      it (open decision §8.5).~~ **Resolved 2026-07-28:** Google Tasks
-      disabled for v1 deploy — GCP OAuth discontinued to minimize external
-      API surfaces (§8.5). Coach feedback delivered via Telegram reply
-      instead of Google Task notes. Integration code retained for future
-      re-enablement.
 - [ ] Structured log → Loki → Grafana dashboard if observability needs grow.
 - [ ] Golden-output test suite for the coach pass: collect 10 real coach
       responses, manually rate them, lock them as regression baselines.
@@ -298,7 +281,7 @@ treated as final.
 - [ ] Nudge flow with inline buttons (issue #047).
 - [ ] Pinned message credits display (issue #048).
 - [ ] Expiry redesign: 22:00 sweep with [Extend to Tomorrow] button, no
-      status change / Google Tasks / summary message (issue #049).
+      status change / summary message (issue #049).
 
 **Exit criteria:** inline buttons render correctly on Telegram; credit
 balance updates after every solve/review/saw-solution/skip; nudge fires
@@ -325,11 +308,13 @@ Phase 6 is the deploy gate. Phase 7 is open-ended. Phase 9 (inline UI +
 credit/budget system) builds on the Phase 8 command router and pinned
 message; its planning lives in `plan/PHASE9_DESIGN.md`.
 
-The two n8n business-logic bugs (missing unsolved pool, missing Google Task
-notes append) are fixed in the phase where the relevant code is written —
-Phase 2 and Phase 3b respectively — not as a separate "fix" phase. The three
-n8n error-handling gaps (missing retry on Data Table, missing Google auth
-branch, missing Telegram Trigger onError) are free in Python: retries are
-default-on in `tenacity`, the Google auth branch is a typed exception, and
-the Telegram webhook handler is a normal FastAPI route with normal error
-handling.
+The two n8n business-logic bugs (missing unsolved pool, ~~missing Google Task
+notes append~~) are fixed in the phase where the relevant code is written —
+Phase 2 and Phase 3b respectively — not as a separate "fix" phase. (The
+Google Task notes-append bug is now moot — the integration was removed
+2026-07-31; see `business-requirements.md` §8 decision 5.) The three
+n8n error-handling gaps (missing retry on Data Table, ~~missing Google auth
+branch~~, missing Telegram Trigger onError) are free in Python: retries are
+default-on in `tenacity`, ~~the Google auth branch is a typed exception~~
+(removed with the integration), and the Telegram webhook handler is a normal
+FastAPI route with normal error handling.

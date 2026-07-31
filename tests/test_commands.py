@@ -577,7 +577,6 @@ async def test_handle_update_non_slash_falls_through_to_fr22(sqlite_session_fact
         session.add(
             db_models.PendingReview(
                 message_id=50,
-                google_task_id="t1",
                 problem_slug="merge-intervals",
                 problem_title="Merge Intervals",
                 proposed_at=today,
@@ -632,7 +631,6 @@ def _insert_pending_review(
         session.add(
             db_models.PendingReview(
                 message_id=message_id,
-                google_task_id=f"task-{problem_slug}",
                 problem_slug=problem_slug,
                 problem_title=problem_title,
                 proposed_at=today,

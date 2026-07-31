@@ -67,7 +67,6 @@ class PendingReview(SQLModel, table=True):
 
     id: int | None = Field(default=None, primary_key=True)
     message_id: int = Field(index=True)  # Telegram per-problem message_id
-    google_task_id: str = Field(default="", max_length=200)
     problem_slug: str = Field(max_length=200, foreign_key="leetcode_problems.slug")
     problem_title: str = Field(max_length=300)  # denormalized for fuzzy match
     proposed_at: datetime.date = Field(default_factory=datetime.date.today, index=True)

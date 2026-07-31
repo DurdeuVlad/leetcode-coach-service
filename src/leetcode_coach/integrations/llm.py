@@ -40,9 +40,15 @@ from leetcode_coach.errors import LLMUnavailableError
 
 log = structlog.get_logger("llm")
 
-# Primary/fallback model names (architecture.md §2).
-_PRIMARY_MODEL = "gpt-5.6-sol"
-_FALLBACK_MODEL = "gemini-3.6-flash"
+
+def _primary_model() -> str:
+    """Primary model name from env (default per architecture.md §2)."""
+    return get_settings().openai_model
+
+
+def _fallback_model() -> str:
+    """Fallback model name from env (default per architecture.md §2)."""
+    return get_settings().gemini_model
 
 
 @dataclass
@@ -121,7 +127,7 @@ class LLMClient:
         client = openai.AsyncOpenAI(api_key=get_settings().openai_api_key, max_retries=0)
         try:
             resp = await client.chat.completions.create(
-                model=_PRIMARY_MODEL,
+                model=_primary_model(),
                 messages=[
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},
@@ -165,7 +171,7 @@ class LLMClient:
         client = genai.Client(api_key=get_settings().gemini_api_key)
         try:
             resp = await client.aio.models.generate_content(
-                model=_FALLBACK_MODEL,
+                model=_fallback_model(),
                 contents=user,
                 config=types.GenerateContentConfig(
                     system_instruction=system,
@@ -184,7 +190,7 @@ class LLMClient:
         usage = resp.usage_metadata
         return LLMResponse(
             text=resp.text or "",
-            model=_FALLBACK_MODEL,
+            model=_fallback_model(),
             tokens_in=usage.prompt_token_count if usage else 0,
             tokens_out=usage.candidates_token_count if usage else 0,
         )
@@ -208,12 +214,28 @@ def parse_json_response(text: str) -> dict:
 def _mock_response(system: str, user: str) -> LLMResponse:
     """Return a canned `LLMResponse` matching the prompt output contract.
 
-    Detects propose vs coach by inspecting the system/user prompt content.
-    The shapes match what prompts/propose.py and prompts/coach.py require.
+    Detects propose vs coach by inspecting the rendered user prompt for stable
+    markers. The previous detection checked ``system`` for tokens that only
+    appear in the user prompt, so mock mode never fired through the real flow
+    path (``/propose`` / ``/coach`` got the generic fallback and failed
+    validation). The markers below are verbatim from the prompt templates in
+    ``prompts/propose.py`` and ``prompts/coach.py``.
     """
-    if "propose 5 candidate" in system.lower() or "candidate_list_markdown" in system.lower():
+    u = user.lower()
+    s = system.lower()
+    if (
+        "unsolved problems i can pick from" in u
+        or "candidate_list_markdown" in u
+        or "candidate_list_markdown" in s
+        or "propose 5 candidate" in s
+    ):
         text = json.dumps(_MOCK_PROPOSE)
-    elif "tutor_feedback" in system.lower() or "lesson_should_graduate" in system.lower():
+    elif (
+        "user's submission:" in u
+        or "active lessons (check if this submission" in u
+        or "user's submission:" in s
+        or "active lessons (check if this submission" in s
+    ):
         text = json.dumps(_MOCK_COACH)
     else:
         text = json.dumps({"text": "mock llm response"})

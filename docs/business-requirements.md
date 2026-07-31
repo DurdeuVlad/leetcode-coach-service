@@ -15,7 +15,7 @@ the bot."
 
 ## 2. User model
 
-- One user. One Telegram chat. One Google Tasks account. One LeetCode account.
+- One user. One Telegram chat. One LeetCode account.
 - Daily cadence: morning problem proposal, day-time attempt, evening expiry sweep.
 - Active ~10-12 hrs/week alongside a full-time job; the system must respect that
   load by capping daily volume (see §4).
@@ -25,7 +25,6 @@ the bot."
 | Surface | Direction | Role |
 |---|---|---|
 | Telegram bot | bidirectional | primary UI: receives picks + code replies, sends proposals + feedback |
-| Google Tasks | outbound | mirrors each chosen problem as a task; updated on completion/expiry |
 | LLM provider (OpenAI primary, Gemini fallback) | outbound | candidate selection + coach pass |
 | LeetCode GraphQL via Browserless (homelab) | outbound (weekly) | refreshes the unsolved problem pool; headless Chrome gets past Cloudflare |
 | YouTube search via SearXNG (homelab) | outbound (per coach pass) | finds tutorial videos for the coach prompt |
@@ -54,6 +53,18 @@ the bot."
   visible per candidate. The flow then **ends** — it does not wait for the reply.
   Replies are handled by Flow B (FR-2). On-demand trigger via `/propose` (FR-6)
   also starts Flow A; the flow still ends after sending.
+
+  **Rendering decision (2026-07-30, see `docs/telegram-formatting.md`):** the
+  propose message is rendered in **code** from the `candidates` array, not by
+  the LLM. The LLM emits only the `candidates` array with plain-text fields
+  (`title`, `tags`, `reasoning`, `coaching_hint`, etc.); the code builds an
+  HTML card (`<b>`, `<a href>`, `<blockquote>`, difficulty emoji 🔴🟡🟢) and
+  sends it with `parse_mode="HTML"`. The previous design had the LLM emit a
+  `candidate_list_markdown` field (MarkdownV2), but the code sent it as plain
+  text (no `parse_mode`) because MarkdownV2 rejects on missing escapes —
+  producing visible `\.`/`\-` escape artifacts in the user-facing message.
+  HTML + `html.escape` (3 escape characters) is strictly simpler than
+  MarkdownV2 (19 escape characters) and the LLM never touches the escaping.
 - **FR-1.7** The LLM must never invent problem titles or URLs. If it cannot confirm
   a problem exists from the pool, it must skip it.
 
@@ -77,10 +88,9 @@ the bot."
 - **FR-2.4** For each chosen problem, in order:
   1. Send an individual Telegram message ("Problem 1/2: ...") including the
      `coaching_hint`. Capture its `message_id`.
-  2. Create a Google Task: title = problem name, notes = slug + reasoning +
-     `coaching_hint`, due = next day. Capture the `task_id`.
-  3. Insert a `pending_review` row: `message_id`, `google_task_id`,
+  2. Insert a `pending_review` row: `message_id`,
      `problem_slug`, `problem_title`, `proposed_at = today`, `status = open`.
+     (The Google Task creation step was removed in v1 — see §8 decision 5.)
 - **FR-2.5** Coach pass: an LLM call that reads the user's submission text plus
   the problem metadata plus the user's active `tutor_lessons`. Output:
   - If code was pasted: **coaching**, not just grading —
@@ -107,19 +117,20 @@ the bot."
   1. Insert a `leetcode_log` row (full schema, including `lesson_title` if a
      lesson fired).
   2. If solved: mark `leetcode_problems.solved = true`.
-  3. Update the matching Google Task: mark complete **and append the coach
-     feedback to the task's notes field** (not replace).
-  4. Update the `pending_review` row: `status = done`.
-  5. Reply on Telegram with a short confirmation + coach feedback, explicitly
+  3. Update the `pending_review` row: `status = done`.
+  4. Reply on Telegram with a short confirmation + coach feedback, explicitly
      naming any lesson saved, reinforced, or retired.
+
+  (The Google Task "mark complete + append feedback to notes" step was
+  removed in v1 — see §8 decision 5. The coach feedback is delivered via
+  the Telegram reply in step 4 instead.)
 
 ### FR-3 — Expiry sweep
 
 - **FR-3.1** Once per day at 05:05 Europe/Bucharest, sweep all `pending_review`
   rows for the current day where `status = open`.
-- **FR-3.2** For each: set `status = expired`, update the matching Google Task's
-  notes with "Expired without reply on <date>" (do **not** delete the task —
-  the record is useful).
+- **FR-3.2** For each: set `status = expired`. (The Google Task notes-append
+  step was removed in v1 — see §8 decision 5.)
 - **FR-3.3** Send one Telegram summary message listing the expired problems
   (or "No problems expired today" if none).
 
@@ -213,7 +224,6 @@ Five tables. Column names are case-sensitive and referenced by name in code.
 | Column | Type | Notes |
 |---|---|---|
 | `message_id` | number | Telegram message_id of the per-problem msg; correlation key |
-| `google_task_id` | string | Google Task ID |
 | `problem_slug` | string | FK |
 | `problem_title` | string | denormalized for fuzzy match |
 | `proposed_at` | date | when Flow A sent the msg |
@@ -247,12 +257,11 @@ do not add columns to existing tables for one-off state.
   is the headline NFR.
 - Three error layers (mirrored from the n8n v3 spec):
   1. **Retry** on transient failures (HTTP 429, timeouts, 5xx) for every
-     external call: LLM, Google Tasks, Telegram, LeetCode GraphQL. Max 2-3
-     tries with short backoff.
-  2. **Typed error branches** for known non-recoverable failures —
-     specifically Google auth (`invalid_grant`). Route to a distinct Telegram
-     alert ("Google auth expired — re-authenticate"). Never let the LLM
-     "log with estimated defaults" to paper over an infra failure.
+     external call: LLM, Telegram, LeetCode GraphQL. Max 2-3 tries with
+     short backoff.
+  2. **Typed error branches** for known non-recoverable failures:
+     LeetCode-fetch and LLM-provider failures. Never let the LLM "log
+     with estimated defaults" to paper over an infra failure.
   3. **Global catch** that sends one Telegram alert for anything that escapes
      layers 1 and 2.
 
@@ -269,10 +278,8 @@ do not add columns to existing tables for one-off state.
 
 ### NFR-4 — Security
 - Telegram `chatId` allowlist: only Vlad's chat ID can drive the bot.
-- Secrets (LLM API keys, Google OAuth refresh token, Telegram bot token,
-  YouTube API key if used) live in environment variables, never in the repo.
-- The Google OAuth refresh token is the highest-risk secret; its 7-day
-  Testing-mode expiry is a known ops issue (see `architecture.md` §6).
+- Secrets (LLM API keys, Telegram bot token, YouTube API key if used) live
+  in environment variables, never in the repo.
 
 ### NFR-5 — Operability
 - Single Docker container deployable on Coolify.
@@ -314,11 +321,13 @@ do not add columns to existing tables for one-off state.
    page context (Browserless `/function`) is the robust default. If
    Browserless is unavailable, fail loudly with `LeetCodeFetchError`.
 5. **~~Whether to keep the Google Tasks integration at all.~~**
-   **Resolved 2026-07-28:** Google Tasks is **disabled for v1**. GCP OAuth
-   is discontinued to minimize external API surfaces and auth complexity.
-   All four `GOOGLE_*` env vars default to empty; `google_tasks.py` runs
-   in mock mode (synthetic task IDs, no-op mark_complete/update_task). The
-   flows still work end-to-end; coach feedback is delivered via the
-   Telegram reply instead of Google Task notes. The integration code is
-   retained for future re-enablement — set the four env vars and flip the
-   GCP consent screen to `In production` to restore it.
+   **Resolved 2026-07-31: removed from v1.** The original n8n v3 workflow
+   mirrored each chosen problem into Google Tasks via GCP OAuth. That
+   integration is **not ported** to the Python app: it added an external
+   API surface and an OAuth refresh-token flow whose 7-day expiry was a
+   recurring source of manual re-auth, for no user-facing value (the
+   coach feedback already lives in the Telegram reply). Coach feedback
+   is delivered via the Telegram reply instead of Google Task notes.
+   The original n8n behavior is preserved in
+   `n8n-reference/workflows/flow-b-telegram-and-coach.json` for the
+   historical record.

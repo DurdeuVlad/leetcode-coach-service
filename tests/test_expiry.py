@@ -1,24 +1,19 @@
 """Expiry sweep tests (#028) — sweep_expired() per FR-3.
 
 FR-3.1: select today's `pending_review` where `status = open`.
-FR-3.2: for each, set `status = expired` + append "Expired without reply
-        on <date>" to the Google Task's notes (do NOT delete the task).
+FR-3.2: for each, set `status = expired`.
 FR-3.3: send exactly one Telegram summary message (or "No problems
         expired today" if none).
 
 Test cases:
-- 0 open rows → no Google Task update, summary says "No problems expired
-  today", return 0.
-- 1 open row → 1 Google Task update (notes_append), 1 row flipped to
-  expired, summary lists 1 problem, return 1.
-- 2 open rows → 2 Google Task updates, 2 rows flipped, summary lists 2,
-  return 2.
+- 0 open rows → no row flips, summary says "No problems expired today",
+  return 0.
+- 1 open row → 1 row flipped to expired, summary lists 1 problem,
+  return 1.
+- 2 open rows → 2 rows flipped, summary lists 2, return 2.
 - Idempotency: a second sweep on the same day finds 0 open rows (already
-  expired) and sends the "No problems expired today" message — no double
-  Google Task note append.
+  expired) and sends the "No problems expired today" message.
 - A row whose `status != open` (e.g. `done`) is NOT touched.
-- A Google Task PATCH failure on one row logs + continues; the DB row is
-  still marked expired and the summary still lists it.
 """
 
 from __future__ import annotations
@@ -61,7 +56,6 @@ def _insert_pending_review(
     problem_slug: str = "problem-1",
     problem_title: str = "Problem 1",
     status: str = "open",
-    google_task_id: str = "task-1",
     proposed_at: datetime.date | None = None,
 ) -> db_models.PendingReview:
     """Insert a pending_review row (and its leetcode_problems FK if missing)."""
@@ -80,7 +74,6 @@ def _insert_pending_review(
             )
         row = db_models.PendingReview(
             message_id=message_id,
-            google_task_id=google_task_id,
             problem_slug=problem_slug,
             problem_title=problem_title,
             proposed_at=today,
@@ -97,53 +90,37 @@ def _insert_pending_review(
 
 @pytest.mark.asyncio
 async def test_zero_open_rows_sends_no_problems_message(sqlite_session_factory):
-    """0 open rows → no Google Task update, summary says 'No problems
-    expired today', return 0."""
+    """0 open rows → summary says 'No problems expired today', return 0."""
     sent: list[str] = []
 
-    with (
-        patch.object(flow_expiry, "update_task", AsyncMock()) as update_mock,
-        patch.object(
-            flow_expiry, "send_message", AsyncMock(side_effect=lambda c, t: sent.append(t))
-        ),
+    with patch.object(
+        flow_expiry, "send_message", AsyncMock(side_effect=lambda c, t: sent.append(t))
     ):
         count = await sweep_expired(chat_id="123")
 
     assert count == 0
-    update_mock.assert_not_called()
     assert len(sent) == 1
     assert "No problems expired today" in sent[0]
 
 
 @pytest.mark.asyncio
 async def test_one_open_row_marked_expired_and_summary_lists_it(sqlite_session_factory):
-    """1 open row → 1 Google Task update with notes_append, 1 row flipped to
-    expired, summary lists 1 problem, return 1."""
+    """1 open row → 1 row flipped to expired, summary lists 1 problem,
+    return 1."""
     _insert_pending_review(
         sqlite_session_factory,
         message_id=100,
         problem_slug="two-sum",
         problem_title="Two Sum",
-        google_task_id="task-A",
     )
     sent: list[str] = []
-    updated_tasks: list[tuple[str, str]] = []
 
-    async def _spy_update(task_id, *, notes_append=None):
-        updated_tasks.append((task_id, notes_append or ""))
-
-    with (
-        patch.object(flow_expiry, "update_task", AsyncMock(side_effect=_spy_update)),
-        patch.object(
-            flow_expiry, "send_message", AsyncMock(side_effect=lambda c, t: sent.append(t))
-        ),
+    with patch.object(
+        flow_expiry, "send_message", AsyncMock(side_effect=lambda c, t: sent.append(t))
     ):
         count = await sweep_expired(chat_id="123")
 
     assert count == 1
-    assert len(updated_tasks) == 1
-    assert updated_tasks[0][0] == "task-A"
-    assert "Expired without reply on" in updated_tasks[0][1]
     assert len(sent) == 1
     assert "Two Sum" in sent[0]
     assert "1 problem" in sent[0]
@@ -157,38 +134,27 @@ async def test_one_open_row_marked_expired_and_summary_lists_it(sqlite_session_f
 
 @pytest.mark.asyncio
 async def test_two_open_rows_all_marked_expired(sqlite_session_factory):
-    """2 open rows → 2 Google Task updates, 2 rows flipped, summary lists 2,
-    return 2."""
+    """2 open rows → 2 rows flipped, summary lists 2, return 2."""
     _insert_pending_review(
         sqlite_session_factory,
         message_id=100,
         problem_slug="two-sum",
         problem_title="Two Sum",
-        google_task_id="task-A",
     )
     _insert_pending_review(
         sqlite_session_factory,
         message_id=200,
         problem_slug="merge-intervals",
         problem_title="Merge Intervals",
-        google_task_id="task-B",
     )
     sent: list[str] = []
-    updated_tasks: list[str] = []
 
-    async def _spy_update(task_id, *, notes_append=None):
-        updated_tasks.append(task_id)
-
-    with (
-        patch.object(flow_expiry, "update_task", AsyncMock(side_effect=_spy_update)),
-        patch.object(
-            flow_expiry, "send_message", AsyncMock(side_effect=lambda c, t: sent.append(t))
-        ),
+    with patch.object(
+        flow_expiry, "send_message", AsyncMock(side_effect=lambda c, t: sent.append(t))
     ):
         count = await sweep_expired(chat_id="123")
 
     assert count == 2
-    assert sorted(updated_tasks) == ["task-A", "task-B"]
     assert len(sent) == 1
     assert "Two Sum" in sent[0]
     assert "Merge Intervals" in sent[0]
@@ -200,21 +166,17 @@ async def test_two_open_rows_all_marked_expired(sqlite_session_factory):
 
 
 @pytest.mark.asyncio
-async def test_idempotent_second_sweep_no_double_append(sqlite_session_factory):
+async def test_idempotent_second_sweep_no_double_flip(sqlite_session_factory):
     """A second sweep on the same day finds 0 open rows (already expired) →
-    no Google Task update, 'No problems expired today' summary. This guards
-    against a missed-cron catch-up double-appending the expiry note."""
+    'No problems expired today' summary. Guards against a missed-cron
+    catch-up re-flipping rows."""
     _insert_pending_review(
         sqlite_session_factory,
         message_id=100,
         problem_title="Two Sum",
-        google_task_id="task-A",
     )
 
-    with (
-        patch.object(flow_expiry, "update_task", AsyncMock()),
-        patch.object(flow_expiry, "send_message", AsyncMock()),
-    ):
+    with patch.object(flow_expiry, "send_message", AsyncMock()):
         first = await sweep_expired(chat_id="123")
         second = await sweep_expired(chat_id="123")
 
@@ -230,73 +192,20 @@ async def test_done_row_not_touched(sqlite_session_factory):
         message_id=100,
         problem_title="Two Sum",
         status="done",
-        google_task_id="task-A",
     )
     sent: list[str] = []
 
-    with (
-        patch.object(flow_expiry, "update_task", AsyncMock()) as update_mock,
-        patch.object(
-            flow_expiry, "send_message", AsyncMock(side_effect=lambda c, t: sent.append(t))
-        ),
+    with patch.object(
+        flow_expiry, "send_message", AsyncMock(side_effect=lambda c, t: sent.append(t))
     ):
         count = await sweep_expired(chat_id="123")
 
     assert count == 0
-    update_mock.assert_not_called()
     assert "No problems expired today" in sent[0]
 
     with Session(sqlite_session_factory) as session:
         row = session.exec(select(db_models.PendingReview)).one()
     assert row.status == "done"
-
-
-@pytest.mark.asyncio
-async def test_google_task_failure_continues_sweep(sqlite_session_factory):
-    """A Google Task PATCH failure on one row logs + continues: the DB row
-    is still marked expired and the summary still lists it. One stale note
-    is not worth aborting the whole sweep (NFR-1 layer 2)."""
-    _insert_pending_review(
-        sqlite_session_factory,
-        message_id=100,
-        problem_slug="two-sum",
-        problem_title="Two Sum",
-        google_task_id="task-A",
-    )
-    _insert_pending_review(
-        sqlite_session_factory,
-        message_id=200,
-        problem_slug="merge-intervals",
-        problem_title="Merge Intervals",
-        google_task_id="task-B",
-    )
-    sent: list[str] = []
-    call_count = 0
-
-    async def _flaky_update(task_id, *, notes_append=None):
-        nonlocal call_count
-        call_count += 1
-        if task_id == "task-A":
-            raise RuntimeError("google tasks 500")
-
-    with (
-        patch.object(flow_expiry, "update_task", AsyncMock(side_effect=_flaky_update)),
-        patch.object(
-            flow_expiry, "send_message", AsyncMock(side_effect=lambda c, t: sent.append(t))
-        ),
-    ):
-        count = await sweep_expired(chat_id="123")
-
-    # Both rows attempted (failure on A did not abort the loop).
-    assert call_count == 2
-    # Both rows still flipped to expired in the DB.
-    assert count == 2
-    with Session(sqlite_session_factory) as session:
-        rows = session.exec(select(db_models.PendingReview)).all()
-    assert all(r.status == "expired" for r in rows)
-    # Summary still lists both.
-    assert "Two Sum" in sent[0]
-    assert "Merge Intervals" in sent[0]
 
 
 @pytest.mark.asyncio
@@ -308,21 +217,16 @@ async def test_yesterday_rows_not_touched(sqlite_session_factory):
         sqlite_session_factory,
         message_id=100,
         problem_title="Old Problem",
-        google_task_id="task-A",
         proposed_at=yesterday,
     )
     sent: list[str] = []
 
-    with (
-        patch.object(flow_expiry, "update_task", AsyncMock()) as update_mock,
-        patch.object(
-            flow_expiry, "send_message", AsyncMock(side_effect=lambda c, t: sent.append(t))
-        ),
+    with patch.object(
+        flow_expiry, "send_message", AsyncMock(side_effect=lambda c, t: sent.append(t))
     ):
         count = await sweep_expired(chat_id="123")
 
     assert count == 0
-    update_mock.assert_not_called()
     assert "No problems expired today" in sent[0]
 
     with Session(sqlite_session_factory) as session:

@@ -32,6 +32,14 @@ PROPOSE_SYSTEM = (
 #  - `{{ }}` → `{}`
 #  - BUG-1 fix: "Problems I've solved (leetcode_problems.solved = true)" →
 #    "Unsolved problems I can pick from (leetcode_problems.solved = false)"
+#  - Rendering fix (docs/telegram-formatting.md §3.2.1): the
+#    `candidate_list_markdown` field is dropped from the JSON contract.
+#    The LLM no longer formats the Telegram message — it emits only the
+#    `candidates` array with plain-text fields, and the code renders the
+#    HTML card. Reason: MarkdownV2 escaping is unreliable in LLM output
+#    and the previous code sent the LLM's markdown as plain text, producing
+#    visible `\.`/`\-` escape artifacts. See docs/business-requirements.md
+#    FR-1.6 for the recorded decision.
 # All other prose is unchanged.
 PROPOSE_PROMPT = """You are my LeetCode coach. Today is {today}.
 
@@ -56,30 +64,29 @@ For EACH candidate, provide:
 - `reasoning`: 1-2 sentences explaining why this problem was chosen for me specifically. Reference my data — which weak pattern it targets, which active lesson it exercises, why the difficulty is appropriate. Not generic ("good practice for DP") — specific ("targets your 'off-by-one on inclusive bounds' lesson; medium because you're 4-for-6 on mediums this week").
 - `coaching_hint`: 1-line personalized note drawn from my active lessons. This will be shown in the per-problem Telegram message and stored in the Google Task. Example: "last time you used a nested loop where a hashmap would do — before writing code, ask: can I trade space for time?"
 
-Output a JSON object with exactly two fields:
-1. `candidate_list_markdown` — a numbered MarkdownV2 string, each entry TWO lines:
-   `N. *Title* — tags — difficulty — URL`
-   `   Why: <reasoning>`
-   `   Hint: <coaching_hint>`
-   This is what gets sent to Telegram.
-2. `candidates` — a JSON array of 5 objects, one per entry above, in the same order. Each object must have exactly these keys:
+Output a JSON object with exactly one field:
+- `candidates` — a JSON array of 5 objects. Each object must have exactly these keys:
    - `slug` (string, URL slug like `two-sum`)
-   - `title` (string)
+   - `title` (string, the problem title — plain text, no markup)
    - `url` (string, full https://leetcode.com/problems/<slug>/ URL)
-   - `tags` (string, comma-separated)
+   - `tags` (string, comma-separated, plain text)
    - `difficulty` (string, one of `easy` / `medium` / `hard`)
-   - `reasoning` (string, 1-2 sentences, why this problem for me)
-   - `coaching_hint` (string, 1 line, personalized note from active lessons)
+   - `reasoning` (string, 1-2 sentences, why this problem for me — plain text, no markup)
+   - `coaching_hint` (string, 1 line, personalized note from active lessons — plain text, no markup)
+
+The system renders the Telegram message from these fields. Do NOT format the
+message yourself. Do NOT include a `candidate_list_markdown` field. Do NOT use
+MarkdownV2, HTML, asterisks, or backslash escapes in any field — emit plain
+text only.
 
 Do not include any other text. Return ONLY the JSON object. No prose. No markdown code fences."""
 
 
 # --- Output JSON contract (for #016 to parse against) ---
 #
-# The LLM returns a single JSON object with exactly two top-level keys:
+# The LLM returns a single JSON object with exactly one top-level key:
 #
 #   {
-#     "candidate_list_markdown": "1. *Two Sum* — array,hash-map — easy — https://...\n   Why: ...\n   Hint: ...\n2. ...",
 #     "candidates": [
 #       {
 #         "slug": "two-sum",
@@ -90,9 +97,13 @@ Do not include any other text. Return ONLY the JSON object. No prose. No markdow
 #         "reasoning": "1-2 sentences...",
 #         "coaching_hint": "1 line..."
 #       },
-#       ...exactly 5 objects, same order as the markdown list
+#       ...exactly 5 objects
 #     ]
 #   }
+#
+# The `candidate_list_markdown` field was removed (docs/telegram-formatting.md
+# §3.2.1): the LLM no longer formats the Telegram message. The code renders
+# an HTML card from the `candidates` array via `flow_a._render_propose_html`.
 #
 # Defensive validation in #016 enforces:
 #   - exactly 5 candidates

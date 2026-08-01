@@ -1,8 +1,8 @@
 """FastAPI application entrypoint.
 
 Single responsibility (per #034): wire the app + lifespan + routes.
-Business logic lives in `flows/`; the lifespan starts/stops the APScheduler
-(#017) and disposes the DB engine.
+Business logic lives in `flows/`; scheduled work runs in the separate
+scheduler service and the lifespan only owns API resources.
 
 Architecture refs:
 - §4: one container, APScheduler in-process via lifespan.
@@ -24,8 +24,9 @@ from sqlalchemy import text
 
 from leetcode_coach.config import get_settings
 from leetcode_coach.db.base import engine
+from leetcode_coach.flows.interactive import register_handlers
+from leetcode_coach.flows.nudge import register_handlers as register_nudge_handlers
 from leetcode_coach.integrations.telegram import set_webhook
-from leetcode_coach.scheduling.cron import is_running, start_scheduler, stop_scheduler
 from leetcode_coach.webhooks.telegram import router as telegram_router
 
 
@@ -46,13 +47,9 @@ def _configure_logging(level: str) -> None:
     )
 
 
-# Scheduler is started/stopped by the lifespan via scheduling.cron (#017).
-# `/health` reads `is_running()` to report scheduler status.
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Startup: configure logging + start scheduler; shutdown: stop both."""
+    """Startup: configure logging and register the inbound webhook."""
     settings = get_settings()
     _configure_logging(settings.log_level)
     log = structlog.get_logger("lifespan")
@@ -80,19 +77,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         openai_api_key="set" if settings.openai_api_key else "empty",
         openai_mock_mode=settings.openai_api_key.lower() == "mock",
         gemini_api_key="set" if settings.gemini_api_key else "empty",
-        google_tasks_enabled=bool(
-            settings.google_client_id
-            and settings.google_client_secret
-            and settings.google_refresh_token
-        ),
         admin_api_enabled=bool(settings.admin_api_key),
         browserless_url=settings.browserless_url or None,
         searxng_url=settings.searxng_url or None,
         leetcode_username=settings.leetcode_username,
         log_level=settings.log_level,
     )
-
-    start_scheduler()
 
     # Register the Telegram webhook if a public URL is configured (#030).
     # No-op in mock mode (dummy/empty token) — the app still boots for local dev.
@@ -111,12 +101,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
-        stop_scheduler()
         engine.dispose()
-        log.info("shutdown", msg="db engine disposed + scheduler stopped")
+        log.info("shutdown", msg="db engine disposed")
 
 
 app = FastAPI(title="LeetCode Coach", version="0.1.0", lifespan=lifespan)
+register_handlers()
+register_nudge_handlers()
 # Inbound Telegram webhook (#019) — the single inbound HTTP surface.
 app.include_router(telegram_router)
 
@@ -142,7 +133,7 @@ async def log_requests(request: Request, call_next):  # type: ignore[no-untyped-
 
     Skips ``/health`` to avoid log spam from Coolify's health probe.
     """
-    if request.url.path == "/health":
+    if request.url.path in ("/health", "/health/deep"):
         return await call_next(request)
     start = time.monotonic()
     status_code: int | None = None
@@ -167,7 +158,12 @@ async def log_requests(request: Request, call_next):  # type: ignore[no-untyped-
 
 @app.get("/health")
 async def health(response: Response) -> dict[str, str]:
-    """200 iff DB reachable; scheduler field reports running/not_started."""
+    """Lightweight liveness probe for the webhook/API process.
+
+    Coolify pings this every few seconds, so it must be cheap: no external
+    HTTP calls. Use ``/health/deep`` for the full external-service probes.
+    200 iff DB reachable. Scheduler liveness is checked by its own service.
+    """
     db_ok = True
     try:
         with engine.connect() as conn:
@@ -175,10 +171,43 @@ async def health(response: Response) -> dict[str, str]:
     except Exception:
         db_ok = False
 
-    sched_ok = is_running()
-    response.status_code = 200 if (db_ok and sched_ok) else 503
+    response.status_code = 200 if db_ok else 503
     return {
-        "status": "ok" if (db_ok and sched_ok) else "degraded",
+        "status": "ok" if db_ok else "degraded",
         "db": "reachable" if db_ok else "unreachable",
-        "scheduler": "running" if sched_ok else "not_started",
+    }
+
+
+@app.get("/health/deep")
+async def health_deep(response: Response) -> dict[str, object]:
+    """Full diagnostic probe — DB + every external service.
+
+    Runs the cheapest possible authenticated round-trip per integration
+    (Telegram getMe, OpenAI 1-token completion, etc.). Mock and disabled
+    services are reported as such — they are not probed. A probe failure
+    never flips the HTTP status; it only surfaces in the payload so an
+    operator can see which integration is down without grepping logs.
+
+    Use this for on-demand diagnostics, not for Coolify's liveness pings
+    (that would rate-limit external APIs). The terminal ``:ping`` command
+    calls the same ``ping_all()`` function.
+    """
+    db_ok = True
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+    except Exception:
+        db_ok = False
+
+    response.status_code = 200 if db_ok else 503
+
+    from leetcode_coach.integrations.connectivity import ping_all
+
+    probes = await ping_all()
+    services = {r.name: {"status": r.status, "detail": r.detail} for r in probes}
+
+    return {
+        "status": "ok" if db_ok else "degraded",
+        "db": "reachable" if db_ok else "unreachable",
+        "services": services,
     }

@@ -24,12 +24,12 @@ released and you've been given the all-clear.
 
 ## What counts as a security issue here
 
-This service integrates with several external APIs (Telegram, OpenAI, Google,
-LeetCode, YouTube) and handles OAuth refresh tokens and API keys. Examples of
+This service integrates with several external APIs (Telegram, OpenAI, Google
+Gemini, LeetCode, YouTube) and handles API keys. Examples of
 real security issues:
 
 - A way to leak `TELEGRAM_BOT_TOKEN`, `OPENAI_API_KEY`,
-  `GOOGLE_REFRESH_TOKEN`, or any other secret via logs, error messages,
+  `GEMINI_API_KEY`, or any other secret via logs, error messages,
   HTTP responses, or the `/health` endpoint.
 - A way to bypass the Telegram chat allowlist (NFR-4) and trigger Flow B
   actions from a non-allowlisted chat.

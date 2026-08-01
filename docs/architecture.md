@@ -13,9 +13,9 @@ runtime for an always-on single-user automation:
 - **Documented n8n bugs in exactly the features this system depends on** —
   Fallback Model + Retry On Fail interaction loops indefinitely (n8n #18797);
   Fallback Model required even when unwanted in older versions (#17140).
-- **Error handling the README asks for** (typed `invalid_grant` branch, no
+- **Error handling the README asks for** (typed branches, no
   "log with estimated defaults") is fiddly per-node in n8n and trivial in
-  Python with `except GoogleAuthError`.
+  Python with typed exceptions.
 - **The Data Table is vendor lock-in** for 4 simple relational shapes.
 - **No tests, no type checking, no real diffs** in n8n JSON.
 
@@ -29,13 +29,12 @@ mechanical.
 |---|---|---|
 | Language | Python 3.12+ | matches the user's strongest language; best LLM SDK support |
 | Web framework | FastAPI | needed for the Telegram webhook endpoint; thin and async |
-| Scheduler | APScheduler (AsyncIO scheduler) | daily 09:05 + 05:05 cron; in-process, no extra container |
+| Scheduler | APScheduler (AsyncIO scheduler) | scheduler-only service, guarded by a PostgreSQL advisory lock |
 | Telegram | `python-telegram-bot` v21+ | handles webhook setup, update parsing, typed `Update` objects |
 | LLM | OpenAI SDK + Google GenAI SDK | primary `gpt-5.6-sol`, fallback `gemini-3.6-flash`; explicit fallback logic (no n8n Fallback Model bugs) |
-| Google Tasks | `httpx` + google-api-python-client | only needs create + update; OAuth2 refresh-token flow |
 | DB | PostgreSQL (Coolify-managed) | relational, portable, queryable; one connection string |
 | DB layer | SQLModel (SQLAlchemy + Pydantic) | typed models, same types in API + DB; migrations via Alembic |
-| HTTP | `httpx` | async, used for LeetCode GraphQL + Google Tasks + YouTube |
+| HTTP | `httpx` | async, used for LeetCode GraphQL + YouTube |
 | Retries | `tenacity` | typed retry policies per call site |
 | Config | `pydantic-settings` | env-var backed, typed, fails fast on missing secrets |
 | Tests | pytest + pytest-asyncio + respx | mocked LLM/HTTP for the coach pass; real Postgres via testcontainers for DB |
@@ -67,7 +66,6 @@ leetcode-coach-service/
 │       │   ├── __init__.py
 │       │   ├── telegram.py      # webhook setup, send_message, send_reply
 │       │   ├── llm.py           # OpenAI primary + Gemini fallback, typed responses
-│       │   ├── google_tasks.py  # create, update, mark complete; invalid_grant handling
 │       │   ├── leetcode.py      # GraphQL pull (weekly refresh)
 │       │   └── youtube.py       # YouTube Data API search (optional, v1)
 │       ├── flows/
@@ -93,7 +91,6 @@ leetcode-coach-service/
 │   ├── test_flow_b.py
 │   ├── test_expiry.py
 │   ├── test_llm_fallback.py
-│   ├── test_google_auth_branch.py
 │   └── test_admin.py
 ├── docs/
 │   ├── business-requirements.md
@@ -115,7 +112,6 @@ flowchart LR
     APP --> DB[("Postgres<br/>Coolify")]
     APP --> LLM["OpenAI<br/>primary"]
     APP --> LLMF["Gemini<br/>fallback"]
-    APP --> GT["Google Tasks<br/>REST"]
     APP --> BL["Browserless<br/>(homelab)"] --> LC["LeetCode<br/>GraphQL"]
     APP --> SX["SearXNG<br/>(homelab)"] --> YT["YouTube search"]
     APP --> TG_OUT["Telegram<br/>sendMessage"]
@@ -123,9 +119,9 @@ flowchart LR
     APP -.raises.-> ERR
 ```
 
-- **One container.** APScheduler runs in-process inside the FastAPI app — no
-  separate scheduler container. The app's lifespan handler starts/stops the
-  scheduler on startup/shutdown.
+- **Two services from one image.** The app owns FastAPI, migrations, webhook
+  registration, and inbound updates. A scheduler-only process owns APScheduler
+  after acquiring a PostgreSQL advisory lock on a dedicated connection.
 - **Telegram webhook** is the inbound HTTP surface for user replies. Endpoint:
   `POST /telegram/webhook`. Telegram sends updates there; the handler
   dispatches to `flow_b.handle_update(update)`.
@@ -138,8 +134,10 @@ flowchart LR
   DB writes and LLM calls still happen, so the test proves the real pipeline
   works. See `docs/llm-api-reference.md` for the request/response contract.
 - **Cron jobs** are APScheduler `CronTrigger` jobs:
-  - `flow_a.propose_5()` at `5 9 * * *` Europe/Bucharest.
-  - `expiry.sweep_expired()` at `5 5 * * *` Europe/Bucharest.
+  - daily tax at `0 0 * * *` Europe/Bucharest.
+  - queue refill at `5 9 * * *` Europe/Bucharest.
+  - nudge at `0 20 * * *` Europe/Bucharest.
+  - expiry at `0 22 * * *` Europe/Bucharest.
   - `leetcode.refresh_pool()` at `0 3 * * 1` (weekly Monday 03:00).
 
 ## 5. LLM client design (the part n8n couldn't do reliably)
@@ -177,31 +175,18 @@ Key properties:
 - The coach pass and the propose pass share the same `LLMClient`. The prompts
   differ; the client doesn't care.
 
-## 6. Google Tasks client and the `invalid_grant` branch
+## 6. Google Tasks integration — not ported
 
-```python
-# src/leetcode_coach/integrations/google_tasks.py (sketch)
-class GoogleTasksClient:
-    async def mark_complete(self, task_id: str, notes_append: str) -> None:
-        try:
-            ...  # get + update call
-        except RefreshError as e:
-            if "invalid_grant" in str(e):
-                raise GoogleAuthExpiredError() from e
-            raise
-```
-
-`GoogleAuthExpiredError` is caught at the flow level and routed to a **distinct
-Telegram alert** ("Google auth expired — re-authenticate the Google credential"),
-per NFR-1 layer 2. It does **not** propagate to the global handler, and the
-coach pass is **never** told to "log with estimated defaults" — that
-anti-pattern from the old Discord workflow is explicitly forbidden.
-
-**Ops note:** the root cause of repeated `invalid_grant` is the GCP OAuth
-consent screen being in `Testing` status, which hard-expires refresh tokens
-at 7 days. The fix is to flip the consent screen to `In production` (single-user
-personal use, no verification needed). Documented in
-`n8n-reference/README.md` lines 325-353 — that guidance carries over unchanged.
+The original n8n v3 workflow mirrored each chosen problem into Google
+Tasks via GCP OAuth, and included a typed `invalid_grant` branch that
+surfaced a distinct "re-authenticate the Google credential" Telegram
+alert. **That integration is not ported to the Python app** (see
+`business-requirements.md` §8 decision 5): it added an external API
+surface and an OAuth refresh-token flow whose 7-day expiry was a
+recurring source of manual re-auth, for no user-facing value. Coach
+feedback is delivered via the Telegram reply instead. The original
+behavior is preserved in `n8n-reference/workflows/flow-b-telegram-and-coach.json`
+for the historical record.
 
 ## 7. Database schema (SQLModel)
 
@@ -240,10 +225,6 @@ TELEGRAM_CHAT_ID=              # the allowlist (single chat)
 TELEGRAM_WEBHOOK_URL=          # public URL Telegram will POST to
 OPENAI_API_KEY=
 GEMINI_API_KEY=
-GOOGLE_CLIENT_ID=               # OPTIONAL — blank = Google Tasks disabled (§8 #5)
-GOOGLE_CLIENT_SECRET=           # OPTIONAL — blank = disabled
-GOOGLE_REFRESH_TOKEN=           # OPTIONAL — blank = disabled
-GOOGLE_TASKS_LIST_ID=           # OPTIONAL — blank = disabled
 SEARXNG_URL=                   # homelab SearXNG JSON endpoint (YouTube search)
 BROWSERLESS_URL=               # homelab Browserless /function endpoint (LeetCode GraphQL)
 LEETCODE_USERNAME=
@@ -257,15 +238,16 @@ with a clear error. No secrets in the repo, ever.
 
 ## 9. Deployment on Coolify
 
-- **One container**, built from `Dockerfile` (multi-stage: uv install → slim
-  runtime).
+- **Two Coolify services**, both built from the same `Dockerfile` (multi-stage:
+  uv install → slim runtime). `app` uses the default uvicorn command;
+  `scheduler` uses `python -m leetcode_coach.scheduler` and exactly one replica.
 - **Postgres**: provisioned as a Coolify-managed Postgres service. The app
   reads `DATABASE_URL` from Coolify's env injection.
 - **Webhook URL**: Coolify gives the container a public HTTPS URL; set
   `TELEGRAM_WEBHOOK_URL` to `https://<coolify-domain>/telegram/webhook` and
   the app calls `setWebhook` on startup.
-- **Healthcheck**: `GET /health` returns 200 if the scheduler is running and
-  the DB is reachable. Coolily watches this and restarts on failure.
+- **Healthcheck**: app `GET /health` returns 200 when its DB is reachable;
+  scheduler uses process liveness because it exposes no HTTP listener.
 - **Resource limits**: 256MB RAM is plenty. The app is idle 99% of the time.
 - **Logs**: structured JSON to stdout. Coolify ships them.
 
@@ -294,14 +276,32 @@ a throwaway Postgres via `testcontainers-postgres` — no mocking the DB.
   If we later want a Grafana dashboard, structlog → Loki → Grafana is the
   path.
 
+## 11a. Scheduler service topology (Phase 9)
+
+The same Docker image runs two Coolify services:
+
+- **app** runs FastAPI, migrations, Telegram webhook registration, and all
+  inbound update handling. Its healthcheck reports only its own database/API
+  readiness; it never starts APScheduler.
+- **scheduler** runs `python -m leetcode_coach.scheduler` with exactly one
+  configured replica. Before it registers any APScheduler jobs it obtains a
+  PostgreSQL advisory lock on a dedicated connection. A second replica stays
+  idle and retries until the leader exits. Its healthcheck is process
+  liveness, not the app's HTTP `/health` endpoint.
+
+The scheduler owns the 00:00 daily tax, 09:05 queue refill, 20:00 nudge,
+22:00 expiry sweep, and Monday 03:00 pool refresh (Europe/Bucharest). The
+scheduler command never runs Alembic; migrations belong solely to the app
+service to avoid startup races.
+
 ## 12. What this architecture deliberately does NOT do
 
 - **No Celery / no Redis / no task queue.** APScheduler in-process is enough
   for 3 cron jobs and an on-demand webhook handler. Adding a queue is
   speculative complexity.
-- **No separate worker process.** One container, one process (uvicorn +
-  in-process scheduler). The system is single-user; horizontal scaling is
-  not a concern.
+- **No task-worker framework.** The deliberately small scheduler service is
+  the only background process; it uses APScheduler plus a PostgreSQL advisory
+  lock, not Celery, Redis, or a queue.
 - **No ORM magic.** SQLModel gives typed rows; queries are explicit
   SQLAlchemy `select()` calls. No `relationship=` cascades, no lazy loading
   surprises.

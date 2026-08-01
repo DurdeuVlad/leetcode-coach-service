@@ -1,88 +1,115 @@
-"""Flow C — the daily 05:05 expiry sweep.
-
-Single responsibility (per #034): mark today's still-open `pending_review`
-rows as expired and send exactly one Telegram summary message (FR-3.3).
-
-This flow is fire-and-forget (scheduled by APScheduler at `5 5 * * *`
-Europe/Bucharest, wired in `scheduling/cron.py`). It is not user-facing
-and has no latency target (NFR-3). It must be idempotent: a re-run on the
-same day only affects rows still `status = open` (already-expired rows are
-skipped).
-
-The caller (`_safe_sweep_expired` in cron.py) wraps the whole thing in
-the #008 alert handler so an escaped exception sends exactly one Telegram
-alert.
-"""
+"""Expiry sweep for overdue review work."""
 
 from __future__ import annotations
 
 import datetime
+from collections import defaultdict
 
 import structlog
 from sqlmodel import select
 
 from leetcode_coach.config import get_settings
 from leetcode_coach.db.base import get_session
-from leetcode_coach.db.models import PendingReview
-from leetcode_coach.integrations.telegram import send_message
+from leetcode_coach.db.models import PendingReview, ProposalBatch, ProposalBatchStatus, ReviewStatus
+from leetcode_coach.db.state import transition_batch, transition_review
+from leetcode_coach.integrations.telegram import edit_message_reply_markup
 
 log = structlog.get_logger("flow_expiry")
 
 
 async def sweep_expired(*, chat_id: str | None = None) -> int:
-    """Mark today's open `pending_review` rows expired and send one summary.
+    """Expire due work in the shared lock order: batch, then reviews.
 
-    FR-3.1: select today's rows where `status = open`.
-    FR-3.2: for each, set `status = expired`.
-    FR-3.3: send exactly one Telegram summary message listing the expired
-            problems (or "No problems expired today" if none).
-
-    Args:
-        chat_id: override the target chat (tests use this; production uses
-            the configured TELEGRAM_CHAT_ID via send_message's allowlist
-            default).
-
-    Returns:
-        The number of rows marked expired (0 means the summary still sends
-        the "No problems expired today" message; useful for tests + logs).
+    Batch due dates supersede proposal dates.  The initial read is only a
+    worklist; each mutable row is re-read with ``FOR UPDATE`` before its
+    transition.  Empty sweeps are silent.
     """
-    settings = get_settings()
-    target_chat = chat_id or settings.telegram_chat_id
     today = datetime.date.today()
-
-    # 1. Select today's open rows.
     with next(get_session()) as session:
-        open_rows = list(
-            session.exec(
-                select(PendingReview).where(
-                    PendingReview.proposed_at == today,
-                    PendingReview.status == "open",
-                )
-            ).all()
-        )
-        titles = [r.problem_title for r in open_rows]
+        worklist = session.exec(
+            select(PendingReview.id, PendingReview.batch_id).where(
+                PendingReview.status == ReviewStatus.OPEN
+            )
+        ).all()
 
-    # 2. Per-row: mark expired.
-    expired_count = 0
-    for row in open_rows:
+    grouped: dict[int, list[int]] = defaultdict(list)
+    legacy_ids: list[int] = []
+    for review_id, batch_id in worklist:
+        if batch_id is None:
+            legacy_ids.append(review_id)
+        else:
+            grouped[batch_id].append(review_id)
+
+    expired_threads: list[int] = []
+    expired_batches: dict[int, int] = {}
+    for batch_id in grouped:
         with next(get_session()) as session:
-            db_row = session.get(PendingReview, row.id)
-            if db_row is not None and db_row.status == "open":
-                db_row.status = "expired"
-                session.add(db_row)
+            # Keep lock order aligned with both callback and text picks.
+            batch = session.exec(
+                select(ProposalBatch).where(ProposalBatch.id == batch_id).with_for_update()
+            ).first()
+            if batch is None:
+                continue
+            due_date = batch.extended_until or batch.expires_at or batch.proposed_at
+            if due_date > today:
+                continue
+            reviews = session.exec(
+                select(PendingReview)
+                .where(
+                    PendingReview.batch_id == batch_id, PendingReview.status == ReviewStatus.OPEN
+                )
+                .with_for_update()
+            ).all()
+            for review in reviews:
+                review.status = transition_review(review.status, ReviewStatus.EXPIRED)
+                session.add(review)
+                expired_threads.append(review.message_id)
+            if reviews and batch.status in {
+                ProposalBatchStatus.CREATED,
+                ProposalBatchStatus.ACTIVE,
+                ProposalBatchStatus.PICKED,
+            }:
+                batch.status = transition_batch(batch.status, ProposalBatchStatus.EXPIRED)
+                session.add(batch)
+                if batch.telegram_message_id is not None:
+                    expired_batches[batch_id] = batch.telegram_message_id
+            if reviews:
                 session.commit()
-                expired_count += 1
 
-    # 3. One Telegram summary message (FR-3.3).
-    if expired_count == 0:
-        summary = "No problems expired today."
-    else:
-        bullet_list = "\n".join(f"  {i}. {t}" for i, t in enumerate(titles, start=1))
-        summary = (
-            f"Expired {expired_count} problem(s) without reply on {today.isoformat()}:\n"
-            f"{bullet_list}"
+    # Legacy rows have no batch/candidate state to coordinate with.
+    for review_id in legacy_ids:
+        with next(get_session()) as session:
+            review = session.exec(
+                select(PendingReview).where(PendingReview.id == review_id).with_for_update()
+            ).first()
+            if review is None or review.status != ReviewStatus.OPEN or review.proposed_at > today:
+                continue
+            review.status = transition_review(review.status, ReviewStatus.EXPIRED)
+            session.add(review)
+            session.commit()
+            expired_threads.append(review.message_id)
+
+    target_chat = chat_id or get_settings().telegram_chat_id
+    for message_id in expired_threads:
+        if message_id > 0:
+            await edit_message_reply_markup(target_chat, message_id, None)
+    for batch_id, message_id in expired_batches.items():
+        from leetcode_coach.webhooks.callbacks import encode_callback
+
+        await edit_message_reply_markup(
+            target_chat,
+            message_id,
+            {
+                "inline_keyboard": [
+                    [
+                        {
+                            "text": "Extend to tomorrow",
+                            "callback_data": encode_callback("extend", {"batch_id": batch_id}),
+                        }
+                    ]
+                ]
+            },
         )
-    await send_message(target_chat, summary)
 
-    log.info("expiry_sweep_done", expired_count=expired_count, date=today.isoformat())
-    return expired_count
+    log.info("expiry_sweep_done", expired_count=len(expired_threads), date=today.isoformat())
+    return len(expired_threads)

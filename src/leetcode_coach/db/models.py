@@ -21,10 +21,52 @@ pydantic's annotation resolution.
 """
 
 import datetime
+from decimal import Decimal
+from enum import Enum
 
+import sqlalchemy as sa
 from sqlmodel import Field
 
 from leetcode_coach.db.base import SQLModel  # re-export for Alembic env.py
+
+
+class ReviewStatus(str, Enum):
+    """Persisted lifecycle states for a problem review."""
+
+    OPEN = "open"
+    COACHING = "coaching"
+    DONE = "done"
+    SKIPPED = "skipped"
+    SAW_SOLUTION = "saw_solution"
+    EXPIRED = "expired"
+
+
+class ProposalBatchStatus(str, Enum):
+    CREATED = "created"
+    ACTIVE = "active"
+    PICKED = "picked"
+    CANCELLED = "cancelled"
+    EXPIRED = "expired"
+
+
+class CandidateStatus(str, Enum):
+    AVAILABLE = "available"
+    SELECTED = "selected"
+    CANCELLED = "cancelled"
+
+
+class ProcessedUpdateStatus(str, Enum):
+    RECEIVED = "received"
+    HANDLED = "handled"
+    FAILED = "failed"
+
+
+class CreditReason(str, Enum):
+    DAILY_TAX = "daily_tax"
+    SOLVED = "solved"
+    REVIEWED = "reviewed"
+    SAW_SOLUTION = "saw_solution"
+    SKIPPED = "skipped"
 
 
 class LeetCodeProblem(SQLModel, table=True):
@@ -54,6 +96,26 @@ class LeetCodeLog(SQLModel, table=True):
     time_spent_min: int | None = Field(default=None)
     tutor_feedback: str | None = Field(default=None)
     lesson_title: str | None = Field(default=None)
+    credits_earned: Decimal = Field(
+        default=Decimal("0"),
+        sa_column=sa.Column(sa.Numeric(8, 2), nullable=False, server_default="0"),
+    )
+
+
+class ProposalBatch(SQLModel, table=True):
+    """One interactive Telegram proposal message and its candidate list."""
+
+    __tablename__ = "proposal_batches"
+
+    id: int | None = Field(default=None, primary_key=True)
+    proposed_at: datetime.date = Field(default_factory=datetime.date.today, index=True)
+    telegram_message_id: int | None = Field(default=None, unique=True, index=True)
+    status: ProposalBatchStatus = Field(
+        default=ProposalBatchStatus.CREATED,
+        sa_column=sa.Column(sa.String(20), nullable=False, server_default="created", index=True),
+    )
+    expires_at: datetime.date | None = Field(default=None, index=True)
+    extended_until: datetime.date | None = Field(default=None)
 
 
 class PendingReview(SQLModel, table=True):
@@ -66,11 +128,29 @@ class PendingReview(SQLModel, table=True):
     __tablename__ = "pending_review"
 
     id: int | None = Field(default=None, primary_key=True)
+    __table_args__ = (
+        # Historical reviews have no candidate link. Every new, batch-backed
+        # selection must consume one of the two persisted slots, making the
+        # cap enforceable even if an application path regresses.
+        sa.CheckConstraint(
+            "candidate_id IS NULL OR (batch_id IS NOT NULL AND pick_slot IN (1, 2))",
+            name="ck_review_pick_slot",
+        ),
+        sa.UniqueConstraint("candidate_id", name="uq_pending_review_candidate"),
+        sa.UniqueConstraint("batch_id", "pick_slot", name="uq_pending_review_batch_pick_slot"),
+    )
+
     message_id: int = Field(index=True)  # Telegram per-problem message_id
     problem_slug: str = Field(max_length=200, foreign_key="leetcode_problems.slug")
     problem_title: str = Field(max_length=300)  # denormalized for fuzzy match
     proposed_at: datetime.date = Field(default_factory=datetime.date.today, index=True)
-    status: str = Field(default="open", max_length=10, index=True)  # open/done/expired
+    batch_id: int | None = Field(default=None, foreign_key="proposal_batches.id", index=True)
+    candidate_id: int | None = Field(default=None, foreign_key="daily_candidates.id", index=True)
+    pick_slot: int | None = Field(default=None)
+    status: ReviewStatus = Field(
+        default=ReviewStatus.OPEN,
+        sa_column=sa.Column(sa.String(20), nullable=False, server_default="open", index=True),
+    )
 
 
 class TutorLesson(SQLModel, table=True):
@@ -113,7 +193,12 @@ class DailyCandidate(SQLModel, table=True):
 
     __tablename__ = "daily_candidates"
 
+    __table_args__ = (
+        sa.UniqueConstraint("batch_id", "pick_index", name="uq_daily_candidate_batch_pick_index"),
+    )
+
     id: int | None = Field(default=None, primary_key=True)
+    batch_id: int | None = Field(default=None, foreign_key="proposal_batches.id", index=True)
     proposed_at: datetime.date = Field(default_factory=datetime.date.today, index=True)
     pick_index: int = Field(default=0)  # 1-based position in the 5-list (1..5)
     slug: str = Field(max_length=200, foreign_key="leetcode_problems.slug")
@@ -123,6 +208,46 @@ class DailyCandidate(SQLModel, table=True):
     difficulty: str = Field(max_length=10)  # easy / medium / hard
     reasoning: str = Field(default="", max_length=1000)
     coaching_hint: str = Field(default="", max_length=1000)
+    status: CandidateStatus = Field(
+        default=CandidateStatus.AVAILABLE,
+        sa_column=sa.Column(sa.String(20), nullable=False, server_default="available", index=True),
+    )
+
+
+class ProcessedUpdate(SQLModel, table=True):
+    """Telegram delivery idempotency record, keyed by Telegram update_id."""
+
+    __tablename__ = "processed_updates"
+
+    update_id: int = Field(primary_key=True)
+    received_at: datetime.datetime = Field(
+        default_factory=lambda: datetime.datetime.now(datetime.UTC),
+        sa_column=sa.Column(sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+    )
+    status: ProcessedUpdateStatus = Field(
+        default=ProcessedUpdateStatus.RECEIVED,
+        sa_column=sa.Column(sa.String(20), nullable=False, server_default="received", index=True),
+    )
+    error: str | None = Field(default=None, max_length=1000)
+
+
+class CreditLedger(SQLModel, table=True):
+    """Append-only, idempotent credit changes."""
+
+    __tablename__ = "credit_ledger"
+
+    id: int | None = Field(default=None, primary_key=True)
+    idempotency_key: str = Field(max_length=200, unique=True, index=True)
+    amount: Decimal = Field(sa_column=sa.Column(sa.Numeric(8, 2), nullable=False))
+    reason: CreditReason = Field(
+        sa_column=sa.Column(sa.String(30), nullable=False, index=True),
+    )
+    review_id: int | None = Field(default=None, foreign_key="pending_review.id", index=True)
+    log_id: int | None = Field(default=None, foreign_key="leetcode_log.id", index=True)
+    created_at: datetime.datetime = Field(
+        default_factory=lambda: datetime.datetime.now(datetime.UTC),
+        sa_column=sa.Column(sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+    )
 
 
 class BotState(SQLModel, table=True):

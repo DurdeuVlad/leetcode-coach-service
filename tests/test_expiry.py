@@ -1,234 +1,90 @@
-"""Expiry sweep tests (#028) — sweep_expired() per FR-3.
-
-FR-3.1: select today's `pending_review` where `status = open`.
-FR-3.2: for each, set `status = expired`.
-FR-3.3: send exactly one Telegram summary message (or "No problems
-        expired today" if none).
-
-Test cases:
-- 0 open rows → no row flips, summary says "No problems expired today",
-  return 0.
-- 1 open row → 1 row flipped to expired, summary lists 1 problem,
-  return 1.
-- 2 open rows → 2 rows flipped, summary lists 2, return 2.
-- Idempotency: a second sweep on the same day finds 0 open rows (already
-  expired) and sends the "No problems expired today" message.
-- A row whose `status != open` (e.g. `done`) is NOT touched.
-"""
-
 from __future__ import annotations
 
 import datetime
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
-from sqlmodel import Session, SQLModel, create_engine, select
+from sqlmodel import Session, SQLModel, create_engine
 
-from leetcode_coach.db import models as db_models
-from leetcode_coach.flows import expiry as flow_expiry
-from leetcode_coach.flows.expiry import sweep_expired
-
-# --- fixtures ---------------------------------------------------------------
-#
-# In-memory SQLite (same pattern as test_flow_a.py / test_flow_b.py). The
-# engine is patched into expiry's module so `next(get_session())` uses our
-# test engine.
+from leetcode_coach.db import models
+from leetcode_coach.flows import expiry
 
 
 @pytest.fixture
-def sqlite_session_factory(monkeypatch: pytest.MonkeyPatch):
-    """Replace expiry's get_session with one backed by in-memory SQLite."""
-    engine = create_engine("sqlite:///:memory:", echo=False)
+def sqlite_session_factory(monkeypatch):
+    engine = create_engine("sqlite:///:memory:")
     SQLModel.metadata.create_all(engine)
 
     def _get_session():
         with Session(engine) as session:
             yield session
 
-    monkeypatch.setattr(flow_expiry, "get_session", _get_session)
+    monkeypatch.setattr(expiry, "get_session", _get_session)
+    monkeypatch.setattr(expiry, "edit_message_reply_markup", AsyncMock())
     return engine
 
 
-def _insert_pending_review(
-    engine,
-    *,
-    message_id: int,
-    problem_slug: str = "problem-1",
-    problem_title: str = "Problem 1",
-    status: str = "open",
-    proposed_at: datetime.date | None = None,
-) -> db_models.PendingReview:
-    """Insert a pending_review row (and its leetcode_problems FK if missing)."""
-    today = proposed_at or datetime.date.today()
-    with Session(engine) as session:
-        if session.get(db_models.LeetCodeProblem, problem_slug) is None:
-            session.add(
-                db_models.LeetCodeProblem(
-                    slug=problem_slug,
-                    title=problem_title,
-                    url=f"https://leetcode.com/problems/{problem_slug}/",
-                    difficulty="medium",
-                    tags="array",
-                    solved=False,
-                )
-            )
-        row = db_models.PendingReview(
-            message_id=message_id,
-            problem_slug=problem_slug,
-            problem_title=problem_title,
-            proposed_at=today,
-            status=status,
-        )
+def _review(factory, *, proposed_at: datetime.date, status: str = "open") -> int:
+    with Session(factory) as session:
+        session.add(models.LeetCodeProblem(slug=f"p-{proposed_at}-{status}", title="Problem", url="https://leetcode.com/problems/p/", difficulty="medium"))
+        row = models.PendingReview(message_id=100 + proposed_at.day, problem_slug=f"p-{proposed_at}-{status}", problem_title="Problem", proposed_at=proposed_at, status=status)
         session.add(row)
         session.commit()
         session.refresh(row)
-        return row
-
-
-# --- tests ------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_zero_open_rows_sends_no_problems_message(sqlite_session_factory):
-    """0 open rows → summary says 'No problems expired today', return 0."""
-    sent: list[str] = []
-
-    with patch.object(
-        flow_expiry, "send_message", AsyncMock(side_effect=lambda c, t: sent.append(t))
-    ):
-        count = await sweep_expired(chat_id="123")
-
-    assert count == 0
-    assert len(sent) == 1
-    assert "No problems expired today" in sent[0]
+        assert row.id is not None
+        return row.id
 
 
 @pytest.mark.asyncio
-async def test_one_open_row_marked_expired_and_summary_lists_it(sqlite_session_factory):
-    """1 open row → 1 row flipped to expired, summary lists 1 problem,
-    return 1."""
-    _insert_pending_review(
-        sqlite_session_factory,
-        message_id=100,
-        problem_slug="two-sum",
-        problem_title="Two Sum",
-    )
-    sent: list[str] = []
-
-    with patch.object(
-        flow_expiry, "send_message", AsyncMock(side_effect=lambda c, t: sent.append(t))
-    ):
-        count = await sweep_expired(chat_id="123")
-
-    assert count == 1
-    assert len(sent) == 1
-    assert "Two Sum" in sent[0]
-    assert "1 problem" in sent[0]
-
-    # DB row flipped to expired.
-    with Session(sqlite_session_factory) as session:
-        rows = session.exec(select(db_models.PendingReview)).all()
-    assert len(rows) == 1
-    assert rows[0].status == "expired"
-
-
-@pytest.mark.asyncio
-async def test_two_open_rows_all_marked_expired(sqlite_session_factory):
-    """2 open rows → 2 rows flipped, summary lists 2, return 2."""
-    _insert_pending_review(
-        sqlite_session_factory,
-        message_id=100,
-        problem_slug="two-sum",
-        problem_title="Two Sum",
-    )
-    _insert_pending_review(
-        sqlite_session_factory,
-        message_id=200,
-        problem_slug="merge-intervals",
-        problem_title="Merge Intervals",
-    )
-    sent: list[str] = []
-
-    with patch.object(
-        flow_expiry, "send_message", AsyncMock(side_effect=lambda c, t: sent.append(t))
-    ):
-        count = await sweep_expired(chat_id="123")
-
-    assert count == 2
-    assert len(sent) == 1
-    assert "Two Sum" in sent[0]
-    assert "Merge Intervals" in sent[0]
-    assert "2 problem" in sent[0]
-
-    with Session(sqlite_session_factory) as session:
-        rows = session.exec(select(db_models.PendingReview)).all()
-    assert all(r.status == "expired" for r in rows)
-
-
-@pytest.mark.asyncio
-async def test_idempotent_second_sweep_no_double_flip(sqlite_session_factory):
-    """A second sweep on the same day finds 0 open rows (already expired) →
-    'No problems expired today' summary. Guards against a missed-cron
-    catch-up re-flipping rows."""
-    _insert_pending_review(
-        sqlite_session_factory,
-        message_id=100,
-        problem_title="Two Sum",
-    )
-
-    with patch.object(flow_expiry, "send_message", AsyncMock()):
-        first = await sweep_expired(chat_id="123")
-        second = await sweep_expired(chat_id="123")
-
-    assert first == 1
-    assert second == 0
-
-
-@pytest.mark.asyncio
-async def test_done_row_not_touched(sqlite_session_factory):
-    """A row with `status = done` is NOT expired by the sweep."""
-    _insert_pending_review(
-        sqlite_session_factory,
-        message_id=100,
-        problem_title="Two Sum",
-        status="done",
-    )
-    sent: list[str] = []
-
-    with patch.object(
-        flow_expiry, "send_message", AsyncMock(side_effect=lambda c, t: sent.append(t))
-    ):
-        count = await sweep_expired(chat_id="123")
-
-    assert count == 0
-    assert "No problems expired today" in sent[0]
-
-    with Session(sqlite_session_factory) as session:
-        row = session.exec(select(db_models.PendingReview)).one()
-    assert row.status == "done"
-
-
-@pytest.mark.asyncio
-async def test_yesterday_rows_not_touched(sqlite_session_factory):
-    """FR-3.1: only TODAY's open rows are swept. Yesterday's open row is
-    left alone (it's stale data, not today's sweep target)."""
+async def test_yesterday_open_review_expires_without_notification(sqlite_session_factory, monkeypatch):
     yesterday = datetime.date.today() - datetime.timedelta(days=1)
-    _insert_pending_review(
-        sqlite_session_factory,
-        message_id=100,
-        problem_title="Old Problem",
-        proposed_at=yesterday,
-    )
-    sent: list[str] = []
-
-    with patch.object(
-        flow_expiry, "send_message", AsyncMock(side_effect=lambda c, t: sent.append(t))
-    ):
-        count = await sweep_expired(chat_id="123")
-
-    assert count == 0
-    assert "No problems expired today" in sent[0]
-
+    row_id = _review(sqlite_session_factory, proposed_at=yesterday)
+    result = await expiry.sweep_expired(chat_id="123456")
+    assert result == 1
     with Session(sqlite_session_factory) as session:
-        row = session.exec(select(db_models.PendingReview)).one()
-    assert row.status == "open"  # unchanged
+        assert session.get(models.PendingReview, row_id).status == models.ReviewStatus.EXPIRED
+
+
+@pytest.mark.asyncio
+async def test_empty_sweep_is_silent(sqlite_session_factory, monkeypatch):
+    assert await expiry.sweep_expired(chat_id="123456") == 0
+
+
+@pytest.mark.asyncio
+async def test_current_day_review_expires_at_tonight(sqlite_session_factory):
+    row_id = _review(sqlite_session_factory, proposed_at=datetime.date.today())
+    assert await expiry.sweep_expired(chat_id="123456") == 1
+    with Session(sqlite_session_factory) as session:
+        assert session.get(models.PendingReview, row_id).status == models.ReviewStatus.EXPIRED
+
+
+@pytest.mark.asyncio
+async def test_terminal_review_is_not_changed(sqlite_session_factory):
+    row_id = _review(sqlite_session_factory, proposed_at=datetime.date.today() - datetime.timedelta(days=1), status="done")
+    assert await expiry.sweep_expired(chat_id="123456") == 0
+    with Session(sqlite_session_factory) as session:
+        assert session.get(models.PendingReview, row_id).status == models.ReviewStatus.DONE
+
+
+@pytest.mark.asyncio
+async def test_extension_defers_expiry_and_expired_thread_buttons_are_removed(
+    sqlite_session_factory, monkeypatch
+):
+    today = datetime.date.today()
+    with Session(sqlite_session_factory) as session:
+        session.add(models.LeetCodeProblem(slug="extended", title="Extended", url="https://leetcode.com/problems/extended/", difficulty="medium"))
+        batch = models.ProposalBatch(
+            proposed_at=today,
+            status=models.ProposalBatchStatus.ACTIVE,
+            expires_at=today,
+            extended_until=today + datetime.timedelta(days=1),
+        )
+        session.add(batch)
+        session.flush()
+        session.add(models.PendingReview(message_id=321, problem_slug="extended", problem_title="Extended", proposed_at=today, batch_id=batch.id, status=models.ReviewStatus.OPEN))
+        session.commit()
+
+    edit = AsyncMock()
+    monkeypatch.setattr(expiry, "edit_message_reply_markup", edit)
+    assert await expiry.sweep_expired(chat_id="123456") == 0
+    edit.assert_not_awaited()

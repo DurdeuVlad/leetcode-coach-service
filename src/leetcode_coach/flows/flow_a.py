@@ -27,7 +27,16 @@ from sqlmodel import select
 
 from leetcode_coach.config import get_settings
 from leetcode_coach.db.base import get_session
-from leetcode_coach.db.models import DailyCandidate, LeetCodeLog, LeetCodeProblem, TutorLesson
+from leetcode_coach.db.models import (
+    CandidateStatus,
+    DailyCandidate,
+    LeetCodeLog,
+    LeetCodeProblem,
+    ProposalBatch,
+    ProposalBatchStatus,
+    TutorLesson,
+)
+from leetcode_coach.db.state import transition_batch
 from leetcode_coach.errors import LeetCodeCoachError
 from leetcode_coach.integrations.llm import LLMClient
 from leetcode_coach.integrations.telegram import send_message
@@ -160,13 +169,9 @@ def _render_propose_html(candidates: Sequence[dict]) -> str:
         badge = _DIFFICULTY_BADGE.get(difficulty, "")
         reasoning = html.escape(str(c.get("reasoning", "")))
         hint = html.escape(str(c.get("coaching_hint", "")))
-        lines.append(
-            f'<b>{i}. <a href="{url}">{title}</a></b> {badge} {html.escape(difficulty)}'
-        )
+        lines.append(f'<b>{i}. <a href="{url}">{title}</a></b> {badge} {html.escape(difficulty)}')
         lines.append(f"<i>{tags}</i>")
-        lines.append(
-            f"<blockquote><b>Why:</b> {reasoning}\n<b>Hint:</b> {hint}</blockquote>"
-        )
+        lines.append(f"<blockquote><b>Why:</b> {reasoning}\n<b>Hint:</b> {hint}</blockquote>")
         lines.append("")
     return "\n".join(lines).rstrip()
 
@@ -213,7 +218,7 @@ def _validate_candidates(candidates: Sequence[dict]) -> None:
         )
 
 
-def _persist_candidates(candidates: Sequence[dict]) -> None:
+def _persist_candidates(candidates: Sequence[dict]) -> int:
     """Persist the 5 candidates into `daily_candidates` for Flow B's pick-parse.
 
     Issue #020 decision: a dedicated `daily_candidates` table (keyed by
@@ -221,21 +226,22 @@ def _persist_candidates(candidates: Sequence[dict]) -> None:
     Preserves the FR-2.2 routing invariant (the 5-list message_id is never
     in `pending_review`).
 
-    Idempotent: deletes today's existing rows first, then inserts 5. This
-    makes a re-run of Flow A (manual or via a missed-cron catch-up) replace
-    rather than duplicate. YAGNI: no historical archive.
+    Each visible proposal receives an immutable batch so reruns cannot
+    overwrite a still-visible Telegram message's candidate mapping.
     """
     today = datetime.date.today()
     with next(get_session()) as session:
-        # Idempotent re-run: clear today's rows before inserting.
-        existing = session.exec(
-            select(DailyCandidate).where(DailyCandidate.proposed_at == today)
-        ).all()
-        for row in existing:
-            session.delete(row)
+        batch = ProposalBatch(
+            proposed_at=today,
+            status=ProposalBatchStatus.CREATED,
+            expires_at=today,
+        )
+        session.add(batch)
+        session.flush()
         for idx, c in enumerate(candidates, start=1):
             session.add(
                 DailyCandidate(
+                    batch_id=batch.id,
                     proposed_at=today,
                     pick_index=idx,
                     slug=str(c["slug"]),
@@ -245,10 +251,44 @@ def _persist_candidates(candidates: Sequence[dict]) -> None:
                     difficulty=str(c["difficulty"]),
                     reasoning=str(c.get("reasoning", "")),
                     coaching_hint=str(c.get("coaching_hint", "")),
+                    status=CandidateStatus.AVAILABLE,
                 )
             )
         session.commit()
-    log.info("flow_a_persisted_candidates", count=len(candidates), date=today.isoformat())
+        batch_id = batch.id
+    assert batch_id is not None
+    log.info(
+        "flow_a_persisted_candidates",
+        batch_id=batch_id,
+        count=len(candidates),
+        date=today.isoformat(),
+    )
+    return batch_id
+
+
+def _pick_keyboard(batch_id: int, candidates: Sequence[dict]) -> dict:
+    """Build Telegram controls that carry only a persisted batch reference."""
+    from leetcode_coach.webhooks.callbacks import encode_callback
+
+    return {
+        "inline_keyboard": [
+            [
+                {
+                    "text": str(index),
+                    "callback_data": encode_callback(
+                        "pick", {"batch_id": batch_id, "pick_index": index}
+                    ),
+                }
+                for index in range(1, len(candidates) + 1)
+            ],
+            [
+                {
+                    "text": "Cancel",
+                    "callback_data": encode_callback("cancel", {"batch_id": batch_id}),
+                }
+            ],
+        ]
+    }
 
 
 async def propose_5(
@@ -291,6 +331,7 @@ async def propose_5(
     candidates = _parse_candidates(response.text)
     _validate_candidates(candidates)
     html_card = _render_propose_html(candidates)
+    batch_id = _persist_candidates(candidates)
 
     if not dry_run:
         # HTML send: the code renders the card from the candidates array
@@ -299,11 +340,23 @@ async def propose_5(
         # leaked MarkdownV2 escape artifacts (`\.`, `\-`) into the user-facing
         # message because the LLM was told to emit MarkdownV2 but parse_mode
         # was omitted (MarkdownV2 rejects on missing escapes).
-        await send_message(target_chat, html_card, parse_mode="HTML")
+        message_id = await send_message(
+            target_chat,
+            html_card,
+            parse_mode="HTML",
+            reply_markup=_pick_keyboard(batch_id, candidates),
+        )
+        if message_id != -1:
+            with next(get_session()) as session:
+                batch = session.get(ProposalBatch, batch_id)
+                if batch is not None:
+                    batch.telegram_message_id = message_id
+                    batch.status = transition_batch(batch.status, ProposalBatchStatus.ACTIVE)
+                    session.add(batch)
+                    session.commit()
     # Persist the 5 candidates so Flow B's pick-parse can map reply numbers
     # → problems (issue #020). Done AFTER the send so a send failure doesn't
     # leave stale candidates; a persist failure here is loud (NFR-1 layer 2).
-    _persist_candidates(candidates)
     log.info(
         "flow_a_sent",
         chars=len(html_card),
@@ -324,3 +377,17 @@ async def propose_5(
             log.warning("pinned_refresh_failed_after_propose")
 
     return html_card
+
+
+async def refill_queue_if_needed() -> None:
+    """Scheduled morning refill: keep a small open queue without duplicate lists."""
+    from leetcode_coach.db.models import PendingReview, ReviewStatus
+
+    with next(get_session()) as session:
+        open_count = len(
+            session.exec(
+                select(PendingReview).where(PendingReview.status == ReviewStatus.OPEN)
+            ).all()
+        )
+    if open_count < 3:
+        await propose_5()

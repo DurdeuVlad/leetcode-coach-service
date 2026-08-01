@@ -43,5 +43,32 @@ services:
       - "8000:8000"
     restart: unless-stopped
 
+  scheduler:
+    build: .
+    command: ["python", "-m", "leetcode_coach.scheduler"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+psycopg://leetcode:leetcode@postgres:5432/leetcode_coach
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-dummy}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-0}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-dummy}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-dummy}
+      SEARXNG_URL: ${SEARXNG_URL:-}
+      BROWSERLESS_URL: ${BROWSERLESS_URL:-}
+      LEETCODE_USERNAME: ${LEETCODE_USERNAME:-dummy}
+      TIMEZONE: ${TIMEZONE:-Europe/Bucharest}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    # The image-level HTTP probe belongs to the app. Scheduler has no HTTP
+    # listener; PID 1 is the scheduler command and exits on an unrecoverable
+    # database/lock failure.
+    healthcheck:
+      test: ["CMD-SHELL", "kill -0 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
 volumes:
   pgdata:

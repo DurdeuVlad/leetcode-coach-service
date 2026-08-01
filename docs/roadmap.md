@@ -253,6 +253,18 @@ message updates after each step. All tests green.
 (`/propose`, `/pick`, `/coach`, `/status`, `/why`), pinned progression
 message with recovery path, and HTTP request logging all live on master.
 
+## Phase 9a — Scheduler service topology
+
+- [x] Run `app` and `scheduler` as separate services from the same image.
+- [x] Restrict APScheduler startup to `python -m leetcode_coach.scheduler`.
+- [x] Guard job registration with a PostgreSQL advisory lock and keep a
+      non-leader replica idle.
+- [x] Move the canonical timed slots to 00:00 tax, 09:05 refill, 20:00
+      nudge, 22:00 expiry, and Monday 03:00 refresh (Europe/Bucharest).
+
+The scheduler calls future credit/nudge/state-machine flows lazily so this
+topology can deploy before those implementation issues land.
+
 ## Phase 9 — Inline UI + credit/debit budget system (planning)
 
 **Goal:** replace the text-only 5-list with inline-button cards, add a

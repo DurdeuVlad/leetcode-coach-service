@@ -32,9 +32,12 @@ from __future__ import annotations
 
 import structlog
 from fastapi import APIRouter, Header, Request, Response
+from sqlalchemy.exc import IntegrityError
 from telegram import Update
 
 from leetcode_coach.config import get_settings
+from leetcode_coach.db.base import get_session
+from leetcode_coach.db.models import ProcessedUpdate, ProcessedUpdateStatus
 from leetcode_coach.errors import send_alert
 
 log = structlog.get_logger("webhook")
@@ -132,16 +135,67 @@ async def telegram_webhook(
         # Silent drop — never echo back to the rejected chat.
         return Response(status_code=200)
 
-    # 5. Dispatch to flow_b. Import here to avoid a circular import at module
+    # Telegram can redeliver updates.  Claim the immutable update id before
+    # any business work so callbacks, picks, and coach passes are at-most-once.
+    if not _claim_update(update.update_id):
+        log.info("webhook_duplicate_update", update_id=update.update_id)
+        return Response(status_code=200)
+
+    # 5. Dispatch callbacks before Flow B's text-only router.  The callback
+    # transport acknowledges every press, including stale buttons.
+    if update.callback_query is not None:
+        from leetcode_coach.webhooks.callbacks import dispatch_callback
+
+        try:
+            await dispatch_callback(update.callback_query)
+            _mark_update(update.update_id, ProcessedUpdateStatus.HANDLED)
+        except Exception as e:
+            _mark_update(update.update_id, ProcessedUpdateStatus.FAILED, str(e))
+            log.error("webhook_callback_failed", error=str(e), update_id=update.update_id)
+            await send_alert(f"Telegram callback dispatch failed: {e!r}")
+        return Response(status_code=200)
+
+    # 6. Dispatch text updates to flow_b. Import here to avoid a circular import at module
     #    load time (flow_b imports webhooks for nothing, but be defensive —
     #    the dispatch boundary is the only place we need it).
     from leetcode_coach.flows.flow_b import handle_update
 
     try:
         await handle_update(update)
+        _mark_update(update.update_id, ProcessedUpdateStatus.HANDLED)
     except Exception as e:
+        _mark_update(update.update_id, ProcessedUpdateStatus.FAILED, str(e))
         # Layer 3 (errors.py): alert the operator, but still 200 so Telegram
         # doesn't retry and re-trigger duplicate processing.
         log.error("webhook_handle_failed", error=str(e), update_id=update.update_id)
         await send_alert(f"Flow B handle_update failed: {e!r}")
     return Response(status_code=200)
+
+
+def _mark_update(update_id: int, status: ProcessedUpdateStatus, error: str | None = None) -> None:
+    with next(get_session()) as session:
+        row = session.get(ProcessedUpdate, update_id)
+        if row is not None:
+            row.status = status
+            row.error = error[:1000] if error else None
+            session.add(row)
+            session.commit()
+
+
+def _claim_update(update_id: int) -> bool:
+    """Atomically claim a Telegram delivery.
+
+    The primary key is the cross-worker serialization point.  A preliminary
+    ``get`` is only an optimization: an IntegrityError on commit is the normal
+    outcome when two webhook workers receive the same update concurrently.
+    """
+    with next(get_session()) as session:
+        if session.get(ProcessedUpdate, update_id) is not None:
+            return False
+        session.add(ProcessedUpdate(update_id=update_id))
+        try:
+            session.commit()
+        except IntegrityError:
+            session.rollback()
+            return False
+    return True

@@ -136,6 +136,20 @@ def _insert_daily_candidates(engine, count: int = 5) -> list[db_models.DailyCand
     return cands
 
 
+def _attach_created_batch(engine) -> int:
+    """Attach today's candidates to a batch in its initial lifecycle state."""
+    with Session(engine) as session:
+        batch = db_models.ProposalBatch(status=db_models.ProposalBatchStatus.CREATED)
+        session.add(batch)
+        session.flush()
+        assert batch.id is not None
+        for candidate in session.exec(select(db_models.DailyCandidate)).all():
+            candidate.batch_id = batch.id
+            session.add(candidate)
+        session.commit()
+        return batch.id
+
+
 def _insert_pending_review(
     engine,
     *,
@@ -225,6 +239,21 @@ async def test_route_reply_to_per_problem_message_goes_coach(sqlite_session_fact
     assert len(coach_calls) == 1
     assert coach_calls[0][2] == "problem-1"
     assert coach_calls[0][3] == "my code"
+
+
+@pytest.mark.asyncio
+async def test_route_reply_to_extended_yesterday_review_goes_coach(sqlite_session_factory):
+    review = _insert_pending_review(sqlite_session_factory, message_id=51)
+    with Session(sqlite_session_factory) as session:
+        row = session.get(db_models.PendingReview, review.id)
+        row.proposed_at = datetime.date.today() - datetime.timedelta(days=1)
+        session.add(row)
+        session.commit()
+    update = _make_update(text="my retry", reply_to_message_id=51)
+    coach = AsyncMock()
+    with patch.object(flow_b, "_coach_pass_path", coach):
+        await handle_update(update)
+    coach.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -397,9 +426,7 @@ async def test_pick_parse_empty_reply_sends_no_valid_picks(sqlite_session_factor
     _insert_daily_candidates(sqlite_session_factory)
     sent = []
 
-    with patch.object(
-        flow_b, "send_message", AsyncMock(side_effect=lambda c, t: sent.append(t))
-    ):
+    with patch.object(flow_b, "send_message", AsyncMock(side_effect=lambda c, t: sent.append(t))):
         await flow_b._pick_parse_path(123456, "hello world")
 
     assert len(sent) == 1
@@ -413,9 +440,7 @@ async def test_pick_parse_empty_reply_sends_no_valid_picks(sqlite_session_factor
 async def test_pick_parse_no_candidates_sends_hint(sqlite_session_factory):
     """No daily_candidates persisted today → fail-loud hint, no rows."""
     sent = []
-    with patch.object(
-        flow_b, "send_message", AsyncMock(side_effect=lambda c, t: sent.append(t))
-    ):
+    with patch.object(flow_b, "send_message", AsyncMock(side_effect=lambda c, t: sent.append(t))):
         await flow_b._pick_parse_path(123456, "1 2")
     assert any("No candidate list" in s for s in sent)
 
@@ -497,6 +522,41 @@ async def test_coach_path_runs_four_steps_in_order(sqlite_session_factory):
     # Order: llm → reply. (log/problem/pending_review are DB writes
     # interleaved but happen before reply per FR-2.7.)
     assert call_order.index("llm") < call_order.index("reply")
+
+
+@pytest.mark.asyncio
+async def test_closed_review_cannot_finalize_log_or_credit(sqlite_session_factory):
+    """A concurrent close after the LLM call must make finalization a no-op."""
+    review = _insert_pending_review(
+        sqlite_session_factory, message_id=50, status=db_models.ReviewStatus.DONE
+    )
+    result = CoachResult(
+        tutor_feedback="late result",
+        lesson_title="",
+        lesson_category="",
+        lesson_is_recurring=False,
+        lesson_should_graduate=False,
+        solved=True,
+        status="solved",
+        next_step="",
+        time_spent_min=None,
+    )
+    outcome = flow_b.LessonOutcome(action="none", title="", times_reinforced=0)
+
+    reply = await flow_b._post_coach_updates(
+        chat_id=123456,
+        inbound_message_id=99,
+        review=review,
+        problem_slug=review.problem_slug,
+        result=result,
+        lesson_outcome=outcome,
+        dry_run=True,
+    )
+
+    assert reply == ""
+    with Session(sqlite_session_factory) as session:
+        assert session.exec(select(db_models.LeetCodeLog)).all() == []
+        assert session.exec(select(db_models.CreditLedger)).all() == []
 
 
 @pytest.mark.asyncio
@@ -839,7 +899,9 @@ async def test_status_note_skipped_logs_status_only(sqlite_session_factory):
     # solved=false → leetcode_problems.solved stays false.
     with Session(sqlite_session_factory) as session:
         prob = session.get(db_models.LeetCodeProblem, "problem-1")
+        review = session.exec(select(db_models.PendingReview)).one()
     assert prob.solved is False
+    assert review.status == db_models.ReviewStatus.SKIPPED
 
 
 # ===========================================================================
@@ -918,3 +980,24 @@ def test_fuzzy_title_match_substring_either_way():
     assert len(_fuzzy_title_match("search", rows)) == 1  # only "Binary Search"
     # none
     assert len(_fuzzy_title_match("totally unrelated", rows)) == 0
+
+
+def test_text_picks_follow_batch_transition_graph(sqlite_session_factory):
+    _insert_daily_candidates(sqlite_session_factory, count=2)
+    batch_id = _attach_created_batch(sqlite_session_factory)
+
+    first, reason = flow_b._reserve_candidates(batch_id=batch_id, pick_indices=[1])
+    assert reason is None and len(first) == 1
+    with Session(sqlite_session_factory) as session:
+        assert (
+            session.get(db_models.ProposalBatch, batch_id).status
+            == db_models.ProposalBatchStatus.ACTIVE
+        )
+
+    second, reason = flow_b._reserve_candidates(batch_id=batch_id, pick_indices=[2])
+    assert reason is None and len(second) == 1
+    with Session(sqlite_session_factory) as session:
+        assert (
+            session.get(db_models.ProposalBatch, batch_id).status
+            == db_models.ProposalBatchStatus.PICKED
+        )

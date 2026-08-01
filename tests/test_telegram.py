@@ -96,3 +96,20 @@ async def test_set_webhook_calls_setwebhook_endpoint() -> None:
     body = json.loads(route.calls.last.request.content)
     assert body["url"] == "https://example.com/tg/webhook"
     assert body["allowed_updates"] == ["message", "callback_query"]
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_callback_helpers_call_telegram_api() -> None:
+    answer = respx.post(url__regex=r".*/bot.*/answerCallbackQuery").mock(
+        return_value=httpx.Response(200, json={"ok": True, "result": True})
+    )
+    markup = respx.post(url__regex=r".*/bot.*/editMessageReplyMarkup").mock(
+        return_value=httpx.Response(200, json={"ok": True, "result": {"message_id": 7}})
+    )
+
+    assert await telegram.answer_callback_query("query-1", text="Done") is True
+    await telegram.edit_message_reply_markup("123456", 7, None)
+
+    assert answer.called
+    assert markup.called

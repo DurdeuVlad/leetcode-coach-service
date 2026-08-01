@@ -29,7 +29,7 @@ mechanical.
 |---|---|---|
 | Language | Python 3.12+ | matches the user's strongest language; best LLM SDK support |
 | Web framework | FastAPI | needed for the Telegram webhook endpoint; thin and async |
-| Scheduler | APScheduler (AsyncIO scheduler) | daily 09:05 + 05:05 cron; in-process, no extra container |
+| Scheduler | APScheduler (AsyncIO scheduler) | scheduler-only service, guarded by a PostgreSQL advisory lock |
 | Telegram | `python-telegram-bot` v21+ | handles webhook setup, update parsing, typed `Update` objects |
 | LLM | OpenAI SDK + Google GenAI SDK | primary `gpt-5.6-sol`, fallback `gemini-3.6-flash`; explicit fallback logic (no n8n Fallback Model bugs) |
 | DB | PostgreSQL (Coolify-managed) | relational, portable, queryable; one connection string |
@@ -119,9 +119,9 @@ flowchart LR
     APP -.raises.-> ERR
 ```
 
-- **One container.** APScheduler runs in-process inside the FastAPI app — no
-  separate scheduler container. The app's lifespan handler starts/stops the
-  scheduler on startup/shutdown.
+- **Two services from one image.** The app owns FastAPI, migrations, webhook
+  registration, and inbound updates. A scheduler-only process owns APScheduler
+  after acquiring a PostgreSQL advisory lock on a dedicated connection.
 - **Telegram webhook** is the inbound HTTP surface for user replies. Endpoint:
   `POST /telegram/webhook`. Telegram sends updates there; the handler
   dispatches to `flow_b.handle_update(update)`.
@@ -134,8 +134,10 @@ flowchart LR
   DB writes and LLM calls still happen, so the test proves the real pipeline
   works. See `docs/llm-api-reference.md` for the request/response contract.
 - **Cron jobs** are APScheduler `CronTrigger` jobs:
-  - `flow_a.propose_5()` at `5 9 * * *` Europe/Bucharest.
-  - `expiry.sweep_expired()` at `5 5 * * *` Europe/Bucharest.
+  - daily tax at `0 0 * * *` Europe/Bucharest.
+  - queue refill at `5 9 * * *` Europe/Bucharest.
+  - nudge at `0 20 * * *` Europe/Bucharest.
+  - expiry at `0 22 * * *` Europe/Bucharest.
   - `leetcode.refresh_pool()` at `0 3 * * 1` (weekly Monday 03:00).
 
 ## 5. LLM client design (the part n8n couldn't do reliably)
@@ -236,15 +238,16 @@ with a clear error. No secrets in the repo, ever.
 
 ## 9. Deployment on Coolify
 
-- **One container**, built from `Dockerfile` (multi-stage: uv install → slim
-  runtime).
+- **Two Coolify services**, both built from the same `Dockerfile` (multi-stage:
+  uv install → slim runtime). `app` uses the default uvicorn command;
+  `scheduler` uses `python -m leetcode_coach.scheduler` and exactly one replica.
 - **Postgres**: provisioned as a Coolify-managed Postgres service. The app
   reads `DATABASE_URL` from Coolify's env injection.
 - **Webhook URL**: Coolify gives the container a public HTTPS URL; set
   `TELEGRAM_WEBHOOK_URL` to `https://<coolify-domain>/telegram/webhook` and
   the app calls `setWebhook` on startup.
-- **Healthcheck**: `GET /health` returns 200 if the scheduler is running and
-  the DB is reachable. Coolily watches this and restarts on failure.
+- **Healthcheck**: app `GET /health` returns 200 when its DB is reachable;
+  scheduler uses process liveness because it exposes no HTTP listener.
 - **Resource limits**: 256MB RAM is plenty. The app is idle 99% of the time.
 - **Logs**: structured JSON to stdout. Coolify ships them.
 
@@ -273,14 +276,32 @@ a throwaway Postgres via `testcontainers-postgres` — no mocking the DB.
   If we later want a Grafana dashboard, structlog → Loki → Grafana is the
   path.
 
+## 11a. Scheduler service topology (Phase 9)
+
+The same Docker image runs two Coolify services:
+
+- **app** runs FastAPI, migrations, Telegram webhook registration, and all
+  inbound update handling. Its healthcheck reports only its own database/API
+  readiness; it never starts APScheduler.
+- **scheduler** runs `python -m leetcode_coach.scheduler` with exactly one
+  configured replica. Before it registers any APScheduler jobs it obtains a
+  PostgreSQL advisory lock on a dedicated connection. A second replica stays
+  idle and retries until the leader exits. Its healthcheck is process
+  liveness, not the app's HTTP `/health` endpoint.
+
+The scheduler owns the 00:00 daily tax, 09:05 queue refill, 20:00 nudge,
+22:00 expiry sweep, and Monday 03:00 pool refresh (Europe/Bucharest). The
+scheduler command never runs Alembic; migrations belong solely to the app
+service to avoid startup races.
+
 ## 12. What this architecture deliberately does NOT do
 
 - **No Celery / no Redis / no task queue.** APScheduler in-process is enough
   for 3 cron jobs and an on-demand webhook handler. Adding a queue is
   speculative complexity.
-- **No separate worker process.** One container, one process (uvicorn +
-  in-process scheduler). The system is single-user; horizontal scaling is
-  not a concern.
+- **No task-worker framework.** The deliberately small scheduler service is
+  the only background process; it uses APScheduler plus a PostgreSQL advisory
+  lock, not Celery, Redis, or a queue.
 - **No ORM magic.** SQLModel gives typed rows; queries are explicit
   SQLAlchemy `select()` calls. No `relationship=` cascades, no lazy loading
   surprises.

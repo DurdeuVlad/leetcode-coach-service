@@ -25,6 +25,7 @@ from leetcode_coach.db.models import DailyCandidate, LeetCodeLog, PendingReview,
 from leetcode_coach.db.queries import get_state, set_state
 from leetcode_coach.errors import TelegramError
 from leetcode_coach.flows.commands import _compute_streak
+from leetcode_coach.flows.credits import balance, format_balance
 from leetcode_coach.integrations.telegram import (
     edit_message_text,
     pin_message,
@@ -89,12 +90,14 @@ def _build_snapshot() -> str:
 
         # Streak (shared helper from #038).
         streak = _compute_streak(session, today)
+        credit_balance = balance(session)
 
     lines = [
         "📊 <b>Today's Progress</b>",
         f"Proposed: <b>{proposed}</b> | Picked: <b>{picked}</b> | "
         f"Coached: <b>{coached}</b> | Expired: <b>{expired}</b>",
         f"📚 Active lessons: <b>{active_lessons}</b>",
+        f"💳 Credits: <b>{format_balance(credit_balance)}</b>",
         f"🔥 Streak: <b>{streak}</b> day{'s' if streak != 1 else ''}",
     ]
     return "\n".join(lines)

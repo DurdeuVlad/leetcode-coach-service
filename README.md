@@ -5,7 +5,7 @@ A Python service that coaches you through one LeetCode problem per day.
 Every morning at 09:05 (configurable timezone) it proposes 5 problems; you
 reply with which two to attempt; you send code for each; an LLM coach
 reviews the code, decides whether to save a new lesson, and closes the
-loop. Un-answered problems expire at 05:05 the next morning.
+loop. The scheduler service handles timed work independently from the webhook app.
 
 This is a **port** of an existing n8n implementation. The original n8n
 workflows and their documentation live in [`n8n-reference/`](./n8n-reference)
@@ -56,8 +56,8 @@ uv run uvicorn leetcode_coach.main:app --reload
 curl localhost:8000/health   # -> {"status":"ok", ...}
 ```
 
-Or just `docker compose up` to run the app + Postgres together (the
-entrypoint runs `alembic upgrade head` before starting uvicorn).
+Or just `docker compose up` to run app + scheduler + Postgres together. The
+app entrypoint runs `alembic upgrade head`; the scheduler intentionally does not.
 
 ## Documentation index
 

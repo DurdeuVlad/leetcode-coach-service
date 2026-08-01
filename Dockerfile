@@ -63,6 +63,7 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD curl -fsS http://127.0.0.1:8000/health || exit 1
 
-# Entrypoint runs `alembic upgrade head` then execs uvicorn (#030 requirement).
+# Entrypoint runs migrations only for the webhook app. The same image also
+# runs the scheduler-only command in Coolify.
 ENTRYPOINT ["/app/entrypoint.sh"]
 CMD ["uvicorn", "leetcode_coach.main:app", "--host", "0.0.0.0", "--port", "8000"]

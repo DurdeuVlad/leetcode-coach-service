@@ -53,10 +53,37 @@ def sqlite_app(monkeypatch: pytest.MonkeyPatch) -> FastAPI:
 
 
 def test_health_ok(sqlite_app: FastAPI) -> None:
-    """`/health` returns 200 + status=ok when the DB is reachable."""
+    """`/health` returns 200 + status=ok when the DB is reachable.
+
+    ``/health`` is the lightweight liveness probe (DB + scheduler only, no
+    external HTTP calls). The full external-service probes live in
+    ``/health/deep`` and are covered by ``test_connectivity.py``.
+    """
     with TestClient(sqlite_app) as client:
         resp = client.get("/health")
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["status"] == "ok"
     assert body["db"] == "reachable"
+    assert "services" not in body  # lightweight — no external probes
+
+
+def test_health_deep_ok(sqlite_app: FastAPI, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`/health/deep` returns 200 + a `services` block with probe results.
+
+    The probes are stubbed so the test never makes real HTTP calls — the
+    probe logic itself is covered by ``test_connectivity.py``.
+    """
+    from leetcode_coach.integrations import connectivity
+
+    async def _stub_ping_all() -> list:
+        return []
+
+    monkeypatch.setattr(connectivity, "ping_all", _stub_ping_all)
+    with TestClient(sqlite_app) as client:
+        resp = client.get("/health/deep")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["status"] == "ok"
+    assert body["db"] == "reachable"
+    assert "services" in body

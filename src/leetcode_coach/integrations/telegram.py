@@ -154,7 +154,8 @@ async def edit_message_text(
     `TelegramError` and creates a new pinned message.
 
     `parse_mode` sets Telegram's formatting mode — ``None`` (default) for
-    plain text, which is what the pinned snapshot uses.
+    plain text, ``"HTML"`` for the pinned progression snapshot
+    (docs/telegram-formatting.md §3.2.4).
 
     The "message is not modified" case (Telegram 400 with that exact
     description) is NOT raised here — it surfaces as a `TelegramError` and
@@ -171,6 +172,42 @@ async def edit_message_text(
     if parse_mode is not None:
         payload["parse_mode"] = parse_mode
     return await _call("editMessageText", payload)
+
+
+async def edit_message_reply_markup(
+    chat_id: str, message_id: int, reply_markup: dict | None
+) -> dict:
+    """Replace an inline keyboard, or remove it when ``reply_markup`` is ``None``.
+
+    This is deliberately separate from :func:`edit_message_text`: state
+    transitions often need to make an old Telegram button inert without
+    changing the user-visible card.
+    """
+    _enforce_allowlist(chat_id)
+    if _is_mock():
+        log.info("edit_message_reply_markup_mock", chat_id=chat_id, message_id=message_id)
+        return {"ok": True}
+    return await _call(
+        "editMessageReplyMarkup",
+        {"chat_id": chat_id, "message_id": message_id, "reply_markup": reply_markup},
+    )
+
+
+async def answer_callback_query(
+    callback_query_id: str,
+    *,
+    text: str | None = None,
+    show_alert: bool = False,
+) -> bool:
+    """Acknowledge a pressed inline button so Telegram clears its spinner."""
+    if _is_mock():
+        log.info("answer_callback_query_mock", callback_query_id=callback_query_id, text=text)
+        return True
+    payload: dict = {"callback_query_id": callback_query_id, "show_alert": show_alert}
+    if text:
+        payload["text"] = text[:200]
+    data = await _call("answerCallbackQuery", payload)
+    return bool(data.get("result", True))
 
 
 async def pin_message(chat_id: str, message_id: int) -> None:

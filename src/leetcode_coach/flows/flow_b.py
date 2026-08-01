@@ -1,26 +1,21 @@
-"""Flow B — reply routing, pick-parse, coach pass, lesson decision, post-coach updates.
+"""Flow B � reply routing, pick-parse, coach pass, lesson decision, post-coach updates.
 
 Single responsibility (per #034): orchestrate the FR-2 pipeline. Holds no
 prompt text (that's `prompts/coach.py`), no raw HTTP (that's the integration
 clients), no SQL strings (that's `db/`).
 
 Routing is data-driven, not text-driven (FR-2.1):
-- reply_to_message_id in `pending_review` → coach pass path
-- reply_to_message_id absent from `pending_review` → pick-parse path
+- reply_to_message_id in `pending_review` ? coach pass path
+- reply_to_message_id absent from `pending_review` ? pick-parse path
   (the reply was to the 5-list message, whose id is never in pending_review)
-- no reply_to → fuzzy title match against today's open `pending_review` rows
-  (exactly 1 → coach; 0 or >1 → clarification prompt, never guess)
+- no reply_to ? fuzzy title match against today's open `pending_review` rows
+  (exactly 1 ? coach; 0 or >1 ? clarification prompt, never guess)
 
 The adaptability loop (FR-2.6) is double-gated for graduation:
 - coach says `lesson_should_graduate = true` AND
-- the DB row's `times_reinforced >= 5` (read from DB, NOT from the coach —
+- the DB row's `times_reinforced >= 5` (read from DB, NOT from the coach �
   AGENTS.md gotcha #4: the coach hallucinating a count is a known failure
   mode).
-
-BUG-2 fix (FR-2.7 step 3, AGENTS.md gotcha #2): the n8n `mark complete`
-node dropped coach feedback by replacing notes. We call
-`google_tasks.mark_complete(task_id, notes_append=tutor_feedback)` —
-append, never replace.
 """
 
 from __future__ import annotations
@@ -32,26 +27,31 @@ import re
 from dataclasses import dataclass
 
 import structlog
-from sqlmodel import select
+from sqlmodel import Session, select
 from telegram import Update
 
 from leetcode_coach.db.base import get_session
 from leetcode_coach.db.models import (
+    CandidateStatus,
     DailyCandidate,
     LeetCodeLog,
     LeetCodeProblem,
     PendingReview,
+    ProposalBatch,
+    ProposalBatchStatus,
+    ReviewStatus,
     TutorLesson,
 )
+from leetcode_coach.db.state import InvalidTransitionError, transition_batch, transition_review
 from leetcode_coach.errors import LeetCodeCoachError
-from leetcode_coach.integrations.google_tasks import create_task, mark_complete
+from leetcode_coach.flows.credits import award_review
 from leetcode_coach.integrations.llm import LLMClient, parse_json_response
 from leetcode_coach.integrations.telegram import send_message, send_reply
 from leetcode_coach.prompts.coach import COACH_PROMPT, COACH_SYSTEM
 
 log = structlog.get_logger("flow_b")
 
-# FR-2.6 graduation threshold — single named constant so #031 can recalibrate
+# FR-2.6 graduation threshold � single named constant so #031 can recalibrate
 # without touching the logic (Open/Closed principle).
 GRADUATION_THRESHOLD = 5
 
@@ -61,6 +61,14 @@ MAX_PICKS = 2
 # FR-2.5 status-note keywords (lowercase). The coach prompt handles the
 # branch within the LLM call, but we use these for a tiny log hint.
 _STATUS_KEYWORDS = ("skipped", "saw solution", "saw the solution")
+
+# Difficulty ? emoji badge for the per-problem thread (matches the propose
+# card in flow_a._DIFFICULTY_BADGE; docs/telegram-formatting.md �3.2.2).
+_DIFFICULTY_BADGE = {
+    "easy": "\U0001f7e2",
+    "medium": "\U0001f7e1",
+    "hard": "\U0001f534",
+}
 
 
 # --- Coach response contract (#024) ---
@@ -97,7 +105,7 @@ _VALID_LESSON_CATEGORIES = (
 
 class CoachParseError(LeetCodeCoachError):
     """The coach LLM returned structurally invalid JSON. Fail loud (NFR-1
-    layer 2) — never fabricate fields or "log estimated defaults"."""
+    layer 2) � never fabricate fields or "log estimated defaults"."""
 
 
 class FlowBRoutingError(LeetCodeCoachError):
@@ -131,14 +139,14 @@ class LessonOutcome:
 
 
 # ===========================================================================
-# #021 — handle_update: the data-driven router (FR-2.2)
+# #021 � handle_update: the data-driven router (FR-2.2)
 # ===========================================================================
 
 
 async def handle_update(update: Update) -> None:
     """Route an inbound Telegram Update per FR-2.2.
 
-    This function *routes only* — it decides the path and delegates to
+    This function *routes only* � it decides the path and delegates to
     `_pick_parse_path` (#022) or `_coach_pass_path` (#024+#025+#026). It
     performs no side effects beyond the delegation.
 
@@ -147,15 +155,15 @@ async def handle_update(update: Update) -> None:
        `flows.commands.route_command` and return. This is the text-driven
        exception to the data-driven rule below.
     1. reply_to_message.message_id present:
-       - found in pending_review (today, any status) → coach pass
-       - not found → pick-parse (reply was to the 5-list)
+       - found in pending_review (today, any status) ? coach pass
+       - not found ? pick-parse (reply was to the 5-list)
     2. no reply_to: fuzzy title match against today's OPEN pending_review:
-       - exactly 1 → coach pass
-       - 0 or >1 → clarification prompt, stop (never guess)
+       - exactly 1 ? coach pass
+       - 0 or >1 ? clarification prompt, stop (never guess)
     """
     msg = update.message
     if msg is None or msg.text is None:
-        # callback_query or non-text update — out of scope for v1 (FR-2.1
+        # callback_query or non-text update � out of scope for v1 (FR-2.1
         # mentions callback_query for the inline keyboard UI, but the
         # current Flow A sends plain text; revisit if/when Flow A adds
         # reply_markup). Silent drop.
@@ -176,18 +184,15 @@ async def handle_update(update: Update) -> None:
     text = msg.text.strip()
     reply_to = msg.reply_to_message
 
-    today = datetime.date.today()
-
     if reply_to is not None and reply_to.message_id is not None:
-        # FR-2.2.1: reply_to present → lookup pending_review by message_id.
+        # FR-2.2.1: reply_to present ? lookup pending_review by message_id.
         with next(get_session()) as session:
             row = session.exec(
                 select(PendingReview).where(
                     PendingReview.message_id == reply_to.message_id,
-                    PendingReview.proposed_at == today,
                 )
             ).first()
-        if row is not None:
+        if row is not None and row.status == ReviewStatus.OPEN:
             log.info(
                 "flow_b_route_coach_reply_to",
                 message_id=reply_to.message_id,
@@ -195,19 +200,35 @@ async def handle_update(update: Update) -> None:
             )
             await _coach_pass_path(chat_id, msg.message_id, row, text)
             return
-        # Not found → it was a reply to the 5-list → pick-parse path.
+        # Not found ? it was a reply to the 5-list ? pick-parse path.
         log.info(
             "flow_b_route_pick_parse",
             reply_to_message_id=reply_to.message_id,
         )
-        await _pick_parse_path(chat_id, text)
+        with next(get_session()) as session:
+            batch = session.exec(
+                select(ProposalBatch).where(
+                    ProposalBatch.telegram_message_id == reply_to.message_id
+                )
+            ).first()
+        if batch is None:
+            # Legacy rows (created before proposal batches existed) remain
+            # routable during migration, but modern unrelated replies do not.
+            with next(get_session()) as session:
+                has_batches = session.exec(select(ProposalBatch.id)).first() is not None
+            if not has_batches:
+                await _pick_parse_path(chat_id, text)
+                return
+            await send_message(chat_id, "That reply is not an active problem or proposal.")
+            return
+        await _pick_parse_path(chat_id, text, batch_id=batch.id)
         return
 
-    # FR-2.2.2: no reply_to → fuzzy title match against today's OPEN rows.
+    # FR-2.2.2: no reply_to ? fuzzy title match against all OPEN rows.  An
+    # explicit Extend action keeps yesterday's thread eligible until expiry.
     with next(get_session()) as session:
         open_rows = session.exec(
             select(PendingReview).where(
-                PendingReview.proposed_at == today,
                 PendingReview.status == "open",
             )
         ).all()
@@ -222,7 +243,7 @@ async def handle_update(update: Update) -> None:
         await _coach_pass_path(chat_id, msg.message_id, row, text)
         return
 
-    # 0 or >1 matches → clarification prompt, stop. Never guess (FR-2.2).
+    # 0 or >1 matches ? clarification prompt, stop. Never guess (FR-2.2).
     if not open_rows:
         await send_message(
             chat_id,
@@ -232,7 +253,7 @@ async def handle_update(update: Update) -> None:
         lines = [f"{i + 1}. {r.problem_title}" for i, r in enumerate(open_rows)]
         await send_message(
             chat_id,
-            "Which one — " + " ".join(lines) + " ? Reply to the problem's "
+            "Which one � " + " ".join(lines) + " ? Reply to the problem's "
             "message, or paste the problem title.",
         )
     log.info("flow_b_route_clarification", matches=len(matches))
@@ -240,7 +261,7 @@ async def handle_update(update: Update) -> None:
 
 def _fuzzy_title_match(text: str, rows: list[PendingReview]) -> list[PendingReview]:
     """FR-2.2.2 fuzzy match: case-insensitive substring match either way
-    (text contains title OR title contains text). KISS — no embeddings,
+    (text contains title OR title contains text). KISS � no embeddings,
     no scoring; the spec says "fuzzy title match" and this is the simplest
     interpretation that satisfies it."""
     t = text.lower()
@@ -252,26 +273,27 @@ def _fuzzy_title_match(text: str, rows: list[PendingReview]) -> list[PendingRevi
 
 
 # ===========================================================================
-# #022 — pick-parse path (FR-2.3, FR-2.4)
+# #022 � pick-parse path (FR-2.3, FR-2.4)
 # ===========================================================================
 
 
-async def _pick_parse_path(chat_id: str, text: str, *, dry_run: bool = False) -> list[dict]:
-    """Parse a pick-list reply (e.g. '2 5') into ≤2 chosen problems, then
+async def _pick_parse_path(
+    chat_id: str, text: str, *, dry_run: bool = False, batch_id: int | None = None
+) -> list[dict]:
+    """Parse a pick-list reply (e.g. '2 5') into =2 chosen problems, then
     create per-problem threads, Google Tasks, and pending_review rows.
 
-    FR-2.3: regex `\\d+`, no LLM. Cap at MAX_PICKS (2). Map indices → today's
-    daily_candidates rows (ordered by pick_index). Empty/invalid → short
+    FR-2.3: regex `\\d+`, no LLM. Cap at MAX_PICKS (2). Map indices ? today's
+    daily_candidates rows (ordered by pick_index). Empty/invalid ? short
     "no valid picks" message, persist nothing, return.
 
     FR-2.4: for each chosen problem, IN ORDER:
     1. Send per-problem Telegram message (incl. coaching_hint); capture message_id.
-    2. Create Google Task (title, notes, due=next day); capture task_id.
-    3. Insert pending_review row (message_id, google_task_id, slug, title, today, open).
+    2. Insert pending_review row (message_id, slug, title, today, open).
 
     When ``dry_run`` is True, Telegram sends are skipped (message_id = -1) but
-    Google Tasks and pending_review rows are still created. Returns a list of
-    dicts describing each created thread (empty in the non-dry-run path).
+    pending_review rows are still created. Returns a list of dicts describing
+    each created thread (empty in the non-dry-run path).
     """
     # FR-2.3: regex parse, cap at MAX_PICKS.
     nums = [int(n) for n in re.findall(r"\d+", text)]
@@ -282,95 +304,48 @@ async def _pick_parse_path(chat_id: str, text: str, *, dry_run: bool = False) ->
         log.info("flow_b_pick_parse_empty", text=text[:100], dry_run=dry_run)
         return []
 
-    today = datetime.date.today()
-    with next(get_session()) as session:
-        candidates = session.exec(
-            select(DailyCandidate)
-            .where(DailyCandidate.proposed_at == today)
-            .order_by(DailyCandidate.pick_index)
-        ).all()
-
-    if not candidates:
-        # No 5-list was persisted today (Flow A didn't run, or #020 failed).
-        # Fail loud — this is a state error, not user error.
+    reservations, reason = _reserve_candidates(batch_id=batch_id, pick_indices=nums)
+    if not reservations:
         if not dry_run:
-            await send_message(chat_id, "No candidate list today. Run /propose first.")
-        log.warning("flow_b_pick_parse_no_candidates", date=today.isoformat(), dry_run=dry_run)
+            messages = {
+                "no_candidates": "No candidate list today. Run /propose first.",
+                "invalid": "No valid picks. Reply with up to 2 numbers, e.g. '2 5'.",
+                "unavailable": "One of those problems was already picked.",
+                "limit": "This proposal already has two picks.",
+                "stale": "That proposal is no longer active.",
+            }
+            await send_message(chat_id, messages.get(reason, "That pick is no longer available."))
         return []
 
-    chosen: list[DailyCandidate] = []
-    for n in nums:
-        # pick_index is 1-based; candidates ordered by pick_index.
-        for c in candidates:
-            if c.pick_index == n:
-                chosen.append(c)
-                break
-
-    if not chosen:
-        if not dry_run:
-            await send_message(chat_id, "No valid picks. Reply with up to 2 numbers, e.g. '2 5'.")
-        log.info("flow_b_pick_parse_no_match", nums=nums, dry_run=dry_run)
-        return []
-
-    log.info("flow_b_pick_parse_chosen", count=len(chosen), indices=nums, dry_run=dry_run)
-
-    # FR-2.4: per-pick side effects, in order.
-    due_date = (today + datetime.timedelta(days=1)).isoformat()
     created_threads: list[dict] = []
-    for i, c in enumerate(chosen, start=1):
-        # Step 1: send per-problem message, capture message_id.
-        # HTML-escape interpolated fields: titles/hints may contain `<`, `>`,
-        # `&` which would otherwise break Telegram's HTML parser.
+    for i, item in enumerate(reservations, start=1):
+        badge = _DIFFICULTY_BADGE.get(str(item["difficulty"]).lower(), "")
         per_problem_text = (
-            f"<b>Problem {i}/{len(chosen)}: {html.escape(c.title)}</b> "
-            f"({html.escape(c.difficulty)})\n\n"
-            f"{html.escape(c.coaching_hint)}\n\n"
-            f"Send your code as a reply to this message."
+            f'<b>Problem {i}/{len(reservations)}: <a href="{html.escape(str(item["url"]), quote=True)}">'
+            f"{html.escape(str(item['title']))}</a></b> {badge} {html.escape(str(item['difficulty']))}\n\n"
+            f"<blockquote>{html.escape(str(item['coaching_hint']))}</blockquote>\n\n"
+            "Reply to this message with your code."
         )
-        if dry_run:
-            message_id = -1
-        else:
-            message_id = await send_message(chat_id, per_problem_text, parse_mode="HTML")
-
-        # Step 2: create Google Task, capture task_id.
-        notes = f"slug: {c.slug}\nreasoning: {c.reasoning}\nhint: {c.coaching_hint}"
-        task_id = await create_task(c.title, notes, due_date)
-
-        # Step 3: insert pending_review row.
+        message_id = (
+            -1 if dry_run else await send_message(chat_id, per_problem_text, parse_mode="HTML")
+        )
         with next(get_session()) as session:
-            review = PendingReview(
-                message_id=message_id,
-                google_task_id=task_id,
-                problem_slug=c.slug,
-                problem_title=c.title,
-                proposed_at=today,
-                status="open",
-            )
-            session.add(review)
-            session.commit()
-            session.refresh(review)
-            pending_review_id = review.id
-        log.info(
-            "flow_b_pick_parse_created",
-            problem_slug=c.slug,
-            message_id=message_id,
-            task_id=task_id,
-            dry_run=dry_run,
-        )
+            review = session.get(PendingReview, int(item["review_id"]))
+            if review is not None:
+                review.message_id = message_id
+                session.add(review)
+                session.commit()
         created_threads.append(
             {
-                "pick_index": c.pick_index,
-                "problem_slug": c.slug,
-                "problem_title": c.title,
-                "difficulty": c.difficulty,
+                "pick_index": item["pick_index"],
+                "problem_slug": item["problem_slug"],
+                "problem_title": item["title"],
+                "difficulty": item["difficulty"],
                 "message_id": message_id,
-                "task_id": task_id,
-                "pending_review_id": pending_review_id,
+                "pending_review_id": item["review_id"],
             }
         )
 
-    # FR-8.2: refresh the pinned progression message after picks are created.
-    # Fire-and-forget: a pinned-message failure must not fail the flow.
     if not dry_run:
         try:
             from leetcode_coach.flows.pinned import refresh_pinned_message
@@ -378,13 +353,179 @@ async def _pick_parse_path(chat_id: str, text: str, *, dry_run: bool = False) ->
             await refresh_pinned_message()
         except Exception:
             log.warning("pinned_refresh_failed_after_pick")
-
     return created_threads
 
 
 # ===========================================================================
-# #024 — coach pass: call LLM + parse structured response (FR-2.5)
+# #024 � coach pass: call LLM + parse structured response (FR-2.5)
 # ===========================================================================
+
+
+def _reserve_candidates(
+    *, batch_id: int | None, pick_indices: list[int]
+) -> tuple[list[dict[str, object]], str | None]:
+    """Lock, validate, and commit candidate selections before Telegram I/O."""
+    requested = list(dict.fromkeys(pick_indices))
+    today = datetime.date.today()
+    with next(get_session()) as session:
+        # Match callback picks' lock order: batch, then candidates.  This
+        # prevents a text pick and a button tap from deadlocking each other.
+        batch: ProposalBatch | None = None
+        effective_batch_id = batch_id
+        if effective_batch_id is None:
+            # This is only the legacy command fallback.  The lookup is not a
+            # lock: it discovers the batch to lock before any mutable rows.
+            first_candidate = session.exec(
+                select(DailyCandidate)
+                .where(DailyCandidate.proposed_at == today)
+                .order_by(DailyCandidate.pick_index)
+            ).first()
+            if first_candidate is None:
+                return [], "no_candidates"
+            effective_batch_id = first_candidate.batch_id
+        if effective_batch_id is not None:
+            batch = session.exec(
+                select(ProposalBatch)
+                .where(ProposalBatch.id == effective_batch_id)
+                .with_for_update()
+            ).first()
+            if batch is None or batch.status not in (
+                ProposalBatchStatus.CREATED,
+                ProposalBatchStatus.ACTIVE,
+                ProposalBatchStatus.PICKED,
+            ):
+                return [], "stale"
+        statement = select(DailyCandidate).order_by(DailyCandidate.pick_index).with_for_update()
+        statement = (
+            statement.where(DailyCandidate.proposed_at == today)
+            if batch is None
+            else statement.where(DailyCandidate.batch_id == effective_batch_id)
+        )
+        candidates = session.exec(statement).all()
+        if not candidates:
+            return [], "no_candidates"
+
+        if effective_batch_id is None:
+            batch = ProposalBatch(proposed_at=today, status=ProposalBatchStatus.ACTIVE)
+            session.add(batch)
+            session.flush()
+            assert batch.id is not None
+            effective_batch_id = batch.id
+            for candidate in candidates:
+                candidate.batch_id = effective_batch_id
+                session.add(candidate)
+        elif batch is None:
+            batch = session.exec(
+                select(ProposalBatch)
+                .where(ProposalBatch.id == effective_batch_id)
+                .with_for_update()
+            ).first()
+            if batch is None or batch.status not in (
+                ProposalBatchStatus.CREATED,
+                ProposalBatchStatus.ACTIVE,
+                ProposalBatchStatus.PICKED,
+            ):
+                return [], "stale"
+
+        by_index = {candidate.pick_index: candidate for candidate in candidates}
+        selected = [by_index[index] for index in requested if index in by_index]
+        if not selected:
+            return [], "invalid"
+        if any(candidate.status != CandidateStatus.AVAILABLE for candidate in selected):
+            return [], "unavailable"
+
+        used_slots = {
+            row.pick_slot
+            for row in session.exec(
+                select(PendingReview)
+                .where(
+                    PendingReview.batch_id == effective_batch_id,
+                    PendingReview.pick_slot.is_not(None),
+                )
+                .with_for_update()
+            ).all()
+        }
+        slots = [slot for slot in range(1, MAX_PICKS + 1) if slot not in used_slots]
+        if len(selected) > len(slots):
+            return [], "limit"
+
+        reserved: list[dict[str, object]] = []
+        for candidate, slot in zip(selected, slots[: len(selected)], strict=True):
+            candidate.status = CandidateStatus.SELECTED
+            review = PendingReview(
+                message_id=-1,
+                problem_slug=candidate.slug,
+                problem_title=candidate.title,
+                proposed_at=today,
+                batch_id=effective_batch_id,
+                candidate_id=candidate.id,
+                pick_slot=slot,
+                status=ReviewStatus.OPEN,
+            )
+            session.add_all([candidate, review])
+            session.flush()
+            assert review.id is not None
+            reserved.append(
+                {
+                    "review_id": review.id,
+                    "pick_index": candidate.pick_index,
+                    "problem_slug": candidate.slug,
+                    "title": candidate.title,
+                    "url": candidate.url,
+                    "difficulty": candidate.difficulty,
+                    "coaching_hint": candidate.coaching_hint,
+                }
+            )
+        # A first selection activates the proposal.  Selecting the second
+        # available slot then advances active -> picked; never skip the
+        # declared created -> active transition.
+        if batch.status == ProposalBatchStatus.CREATED:
+            batch.status = transition_batch(batch.status, ProposalBatchStatus.ACTIVE)
+        if len(used_slots) + len(selected) == MAX_PICKS:
+            batch.status = transition_batch(batch.status, ProposalBatchStatus.PICKED)
+        session.add(batch)
+        session.commit()
+        return reserved, None
+
+
+def _gather_coach_inputs(
+    session: Session,
+    review: PendingReview,
+    user_text: str,
+) -> tuple[str, list[TutorLesson]]:
+    """Gather coach-pass inputs and render the user prompt.
+
+    Looks up the ``LeetCodeProblem`` row for ``review.problem_slug`` (url /
+    difficulty / tags), gathers active ``TutorLesson`` rows (for the prompt's
+    ``active_lessons_json`` field AND for the downstream ``_lesson_decision``),
+    and renders ``COACH_PROMPT``. Returns ``(user_prompt, active_lessons)``.
+
+    Extracted from ``_coach_pass_path`` so the terminal simulator
+    (``scripts/terminal.py``) can render the exact same prompt for
+    ``:prompt coach`` / ``:llm coach`` without duplicating the format call.
+    """
+    problem = session.get(LeetCodeProblem, review.problem_slug)
+    active_lessons = session.exec(
+        select(TutorLesson).where(TutorLesson.active == True)  # noqa: E712
+    ).all()
+
+    problem_url = problem.url if problem is not None else ""
+    difficulty = problem.difficulty if problem is not None else "unknown"
+    tags = problem.tags if problem is not None else ""
+
+    active_lessons_json = json.dumps(
+        [les.model_dump() for les in active_lessons], indent=2, default=str
+    )
+
+    user_prompt = COACH_PROMPT.format(
+        problem_title=review.problem_title,
+        problem_url=problem_url,
+        difficulty=difficulty,
+        tags=tags,
+        user_text=user_text,
+        active_lessons_json=active_lessons_json,
+    )
+    return user_prompt, active_lessons
 
 
 async def _coach_pass_path(
@@ -399,37 +540,29 @@ async def _coach_pass_path(
     the lesson decision (#025) and post-coach updates (#026).
 
     `review` is the matched `pending_review` row. `inbound_message_id` is
-    the user's inbound message id — we reply to it (#026 step 5).
+    the user's inbound message id � we reply to it (#026 step 5).
 
     When ``dry_run`` is True, the Telegram reply is skipped but all DB writes
     and the Google Task update still happen. Returns a tuple of
     ``(CoachResult, LessonOutcome, reply_text)`` so callers (admin API, tests)
     can inspect the full output without scraping Telegram.
     """
-    # Gather inputs: problem metadata + active lessons.
+    # Claim the review before the expensive LLM call.  Replayed deliveries
+    # and stale reply threads fail here instead of creating a second log.
     with next(get_session()) as session:
-        problem = session.get(LeetCodeProblem, review.problem_slug)
-        active_lessons = session.exec(
-            select(TutorLesson).where(TutorLesson.active == True)  # noqa: E712
-        ).all()
-
-    problem_title = review.problem_title
-    problem_url = problem.url if problem is not None else ""
-    difficulty = problem.difficulty if problem is not None else "unknown"
-    tags = problem.tags if problem is not None else ""
-
-    active_lessons_json = json.dumps(
-        [les.model_dump() for les in active_lessons], indent=2, default=str
-    )
-
-    user_prompt = COACH_PROMPT.format(
-        problem_title=problem_title,
-        problem_url=problem_url,
-        difficulty=difficulty,
-        tags=tags,
-        user_text=user_text,
-        active_lessons_json=active_lessons_json,
-    )
+        locked_review = session.exec(
+            select(PendingReview).where(PendingReview.id == review.id).with_for_update()
+        ).first()
+        if locked_review is None:
+            raise FlowBRoutingError("review no longer exists")
+        try:
+            locked_review.status = transition_review(locked_review.status, ReviewStatus.COACHING)
+        except InvalidTransitionError as exc:
+            raise FlowBRoutingError("review is no longer open") from exc
+        session.add(locked_review)
+        session.commit()
+        review = locked_review
+        user_prompt, active_lessons = _gather_coach_inputs(session, review, user_text)
 
     log.info(
         "flow_b_coach_call",
@@ -449,10 +582,10 @@ async def _coach_pass_path(
 
     result = _parse_coach_result(data)
 
-    # #025 — lesson decision (double-gated graduation).
+    # #025 � lesson decision (double-gated graduation).
     lesson_outcome = _lesson_decision(result, active_lessons)
 
-    # #026 — post-coach updates (5 ordered steps + BUG-2 notes append).
+    # #026 � post-coach updates (5 ordered steps + BUG-2 notes append).
     reply_text = await _post_coach_updates(
         chat_id=chat_id,
         inbound_message_id=inbound_message_id,
@@ -469,7 +602,7 @@ def _parse_coach_result(data: dict) -> CoachResult:
     """Validate + parse the coach LLM JSON into a typed `CoachResult`.
 
     Fail loud on missing fields, bad enum values, or impossible combinations
-    (NFR-1 layer 2 — never fabricate or "log estimated defaults").
+    (NFR-1 layer 2 � never fabricate or "log estimated defaults").
     """
     missing = [k for k in _REQUIRED_COACH_FIELDS if k not in data]
     if missing:
@@ -511,7 +644,7 @@ def _parse_coach_result(data: dict) -> CoachResult:
 
 
 # ===========================================================================
-# #025 — lesson decision (double-gated graduation, FR-2.6)
+# #025 � lesson decision (double-gated graduation, FR-2.6)
 # ===========================================================================
 
 
@@ -519,10 +652,10 @@ def _lesson_decision(result: CoachResult, active_lessons: list[TutorLesson]) -> 
     """Apply the adaptability loop: save / reinforce / graduate a lesson.
 
     FR-2.6:
-    - No generalizable lesson (empty lesson_title) → no-op.
-    - Existing active lesson matches (title similarity OR same category) →
+    - No generalizable lesson (empty lesson_title) ? no-op.
+    - Existing active lesson matches (title similarity OR same category) ?
       bump times_reinforced. Do not duplicate.
-    - New lesson → insert with times_reinforced=1, active=true.
+    - New lesson ? insert with times_reinforced=1, active=true.
     - Graduation is double-gated: coach says graduate AND DB count >= 5.
       On graduation: active=false.
 
@@ -539,10 +672,10 @@ def _lesson_decision(result: CoachResult, active_lessons: list[TutorLesson]) -> 
     with next(get_session()) as session:
         if existing is not None:
             # Re-fetch to get the authoritative DB count (don't trust the
-            # in-memory list — it could be stale within this request).
+            # in-memory list � it could be stale within this request).
             row = session.get(TutorLesson, existing.id)
             if row is None:
-                # Was deleted concurrently — treat as new.
+                # Was deleted concurrently � treat as new.
                 session.add(
                     TutorLesson(
                         title=result.lesson_title,
@@ -554,7 +687,7 @@ def _lesson_decision(result: CoachResult, active_lessons: list[TutorLesson]) -> 
                 session.commit()
                 return LessonOutcome(action="saved", title=result.lesson_title, times_reinforced=1)
 
-            # Read the authoritative DB count BEFORE bumping — this is the
+            # Read the authoritative DB count BEFORE bumping � this is the
             # gate value (AGENTS.md gotcha #4: "the DB row's times_reinforced
             # >= 5"). The count as it exists in the DB, not after this session.
             old_count = row.times_reinforced
@@ -564,7 +697,7 @@ def _lesson_decision(result: CoachResult, active_lessons: list[TutorLesson]) -> 
             new_count = row.times_reinforced
 
             # Double-gate: coach says graduate AND the DB count (before this
-            # bump) >= threshold. The DB count is the source of truth — NOT
+            # bump) >= threshold. The DB count is the source of truth � NOT
             # the coach. A coach hallucinating times_reinforced=7 must not
             # graduate a count-2 lesson; and a count-4 lesson hasn't earned
             # graduation even if the coach says so (it needs 5 prior
@@ -580,7 +713,7 @@ def _lesson_decision(result: CoachResult, active_lessons: list[TutorLesson]) -> 
             session.commit()
             return LessonOutcome(action="reinforced", title=row.title, times_reinforced=new_count)
 
-        # No existing match → insert new lesson.
+        # No existing match ? insert new lesson.
         session.add(
             TutorLesson(
                 title=result.lesson_title,
@@ -597,7 +730,7 @@ def _find_existing_lesson(
     title: str, category: str, active_lessons: list[TutorLesson]
 ) -> TutorLesson | None:
     """FR-2.6 matcher: title similarity (case-insensitive substring either
-    way) OR same category. KISS — no embeddings, no scoring. The spec says
+    way) OR same category. KISS � no embeddings, no scoring. The spec says
     "title similarity OR same category + same pattern"; we approximate
     "same pattern" as "same category" since the coach already decided the
     match is recurring."""
@@ -614,7 +747,7 @@ def _find_existing_lesson(
 
 
 # ===========================================================================
-# #026 — post-coach updates (FR-2.7, 5 ordered steps + BUG-2)
+# #026 � post-coach updates (FR-2.7, 5 ordered steps + BUG-2)
 # ===========================================================================
 
 
@@ -628,67 +761,97 @@ async def _post_coach_updates(
     lesson_outcome: LessonOutcome,
     dry_run: bool = False,
 ) -> str:
-    """Apply the five ordered side effects after a coach pass (FR-2.7).
+    """Apply the four ordered side effects after a coach pass (FR-2.7).
 
     1. Insert leetcode_log row (full schema, incl. lesson_title if fired).
-    2. If solved → set leetcode_problems.solved = true.
-    3. mark_complete(task_id, notes_append=tutor_feedback) — APPEND (BUG-2).
-    4. Update pending_review.status = done.
-    5. Telegram reply: short confirmation + coach feedback, naming the
+    2. If solved ? set leetcode_problems.solved = true.
+    3. Update pending_review.status = done.
+    4. Telegram reply: short confirmation + coach feedback, naming the
        lesson outcome.
 
-    When ``dry_run`` is True, step 5 (Telegram reply) is skipped but all DB
-    writes and the Google Task update still happen. Returns the reply text
-    that would have been sent (useful for admin API / tests).
-
-    `GoogleAuthExpiredError` from step 3 is re-raised (the webhook's global
-    catch routes it to the distinct #008 alert — it's already a typed error).
+    When ``dry_run`` is True, step 4 (Telegram reply) is skipped but all DB
+    writes still happen. Returns the reply text that would have been sent
+    (useful for admin API / tests).
     """
     today = datetime.date.today()
 
-    # Step 1: insert leetcode_log row.
+    # Re-lock immediately before finalization. The earlier COACHING claim
+    # prevents duplicate LLM work; this check prevents a concurrent close
+    # from producing a log or credit after that work returns.
     with next(get_session()) as session:
-        session.add(
-            LeetCodeLog(
-                problem_slug=problem_slug,
-                date=today,
-                status=result.status,
-                time_spent_min=result.time_spent_min,
-                tutor_feedback=result.tutor_feedback,
-                lesson_title=result.lesson_title if lesson_outcome.action != "none" else None,
-            )
+        locked_review = session.exec(
+            select(PendingReview).where(PendingReview.id == review.id).with_for_update()
+        ).first()
+        if locked_review is None or locked_review.status != ReviewStatus.COACHING:
+            return ""
+        attempt = LeetCodeLog(
+            problem_slug=problem_slug,
+            date=today,
+            status=result.status,
+            time_spent_min=result.time_spent_min,
+            tutor_feedback=result.tutor_feedback,
+            lesson_title=result.lesson_title if lesson_outcome.action != "none" else None,
         )
+        session.add(attempt)
+        session.flush()
+        problem = session.get(LeetCodeProblem, problem_slug)
+        award_review(
+            session,
+            review_id=locked_review.id,
+            log=attempt,
+            difficulty=problem.difficulty if problem is not None else "medium",
+        )
+        if result.solved and problem is not None:
+            problem.solved = True
+            problem.last_attempted = today
+            problem.times_attempted += 1
+            session.add(problem)
+        terminal_status = {
+            "skipped": ReviewStatus.SKIPPED,
+            "saw_solution": ReviewStatus.SAW_SOLUTION,
+        }.get(result.status, ReviewStatus.DONE)
+        locked_review.status = transition_review(locked_review.status, terminal_status)
+        session.add(locked_review)
         session.commit()
 
-    # Step 2: if solved, mark leetcode_problems.solved = true.
-    if result.solved:
-        with next(get_session()) as session:
-            problem = session.get(LeetCodeProblem, problem_slug)
-            if problem is not None:
-                problem.solved = True
-                problem.last_attempted = today
-                problem.times_attempted += 1
-                session.add(problem)
-                session.commit()
-
-    # Step 3: mark_complete with notes_append (BUG-2 fix — append, not replace).
-    # GoogleAuthExpiredError propagates to the webhook's global catch → alert.
-    await mark_complete(review.google_task_id, notes_append=result.tutor_feedback)
-
-    # Step 4: update pending_review.status = done.
-    with next(get_session()) as session:
-        row = session.get(PendingReview, review.id)
-        if row is not None:
-            row.status = "done"
-            session.add(row)
-            session.commit()
-
-    # Step 5: Telegram reply with confirmation + coach feedback, naming the
+    # Step 4: Telegram reply with confirmation + coach feedback, naming the
     # lesson outcome (saved / reinforced / retired).
+    # `tutor_feedback` is plain text from the LLM (docs/telegram-formatting.md
+    # �3.2.3) � html.escape it before sending as HTML. The footer is built
+    # in code (already escaped). Wrap the feedback in <blockquote> for visual
+    # grouping; the footer goes outside as an italic line.
     footer = _lesson_footer(lesson_outcome)
-    reply_text = f"{result.tutor_feedback}\n\n{footer}" if footer else result.tutor_feedback
+    escaped_feedback = html.escape(result.tutor_feedback)
+    if footer:
+        reply_text = f"<blockquote>{escaped_feedback}</blockquote>\n\n<i>{footer}</i>"
+    else:
+        reply_text = f"<blockquote>{escaped_feedback}</blockquote>"
     if not dry_run:
-        await send_reply(chat_id, inbound_message_id, reply_text, parse_mode="HTML")
+        from leetcode_coach.webhooks.callbacks import encode_callback
+
+        await send_reply(
+            chat_id,
+            inbound_message_id,
+            reply_text,
+            parse_mode="HTML",
+            reply_markup={
+                "inline_keyboard": [
+                    [
+                        {"text": "Next problem", "callback_data": encode_callback("next", {})},
+                        {
+                            "text": "Re-attempt",
+                            "callback_data": encode_callback("reattempt", {"review_id": review.id}),
+                        },
+                        {
+                            "text": "Why this lesson?",
+                            "callback_data": encode_callback(
+                                "why_lesson", {"review_id": review.id}
+                            ),
+                        },
+                    ]
+                ]
+            },
+        )
 
     log.info(
         "flow_b_post_coach_done",
@@ -715,10 +878,10 @@ def _lesson_footer(outcome: LessonOutcome) -> str:
     """Build the lesson-outcome footer for the Telegram reply (FR-2.7 step 5).
 
     Mirrors the prompt's required footer phrasing:
-    - saved → 'Saved lesson: <b><title></b>.'
-    - reinforced → 'Reinforcing lesson: <b><title></b> (Nth time).'
-    - retired → 'Retiring lesson: <b><title></b> — demonstrated consistently.'
-    - none → empty string (no footer).
+    - saved ? 'Saved lesson: <b><title></b>.'
+    - reinforced ? 'Reinforcing lesson: <b><title></b> (Nth time).'
+    - retired ? 'Retiring lesson: <b><title></b> � demonstrated consistently.'
+    - none ? empty string (no footer).
     """
     if outcome.action == "none":
         return ""
@@ -731,6 +894,6 @@ def _lesson_footer(outcome: LessonOutcome) -> str:
         )
     if outcome.action == "retired":
         return (
-            f"Retiring lesson: <b>{html.escape(outcome.title)}</b> " f"— demonstrated consistently."
+            f"Retiring lesson: <b>{html.escape(outcome.title)}</b> " f"� demonstrated consistently."
         )
     return ""

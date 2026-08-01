@@ -31,6 +31,7 @@ from leetcode_coach.flows.flow_a import (
     _build_prompt,
     _gather_data,
     _parse_candidates,
+    _render_propose_html,
     _validate_candidates,
     propose_5,
 )
@@ -160,20 +161,15 @@ def test_build_prompt_includes_today_and_all_sections():
 
 def test_parse_candidates_strips_markdown_fences():
     """Some models wrap JSON in ```json ... ``` despite the prompt saying not to."""
-    payload = {
-        "candidate_list_markdown": "1. *Two Sum*",
-        "candidates": [],
-    }
+    payload = {"candidates": []}
     raw = f"```json\n{json.dumps(payload)}\n```"
-    markdown, candidates = _parse_candidates(raw)
-    assert markdown == "1. *Two Sum*"
+    candidates = _parse_candidates(raw)
     assert candidates == []
 
 
 def test_parse_candidates_plain_json():
-    payload = {"candidate_list_markdown": "## Picks", "candidates": [{"a": 1}]}
-    markdown, candidates = _parse_candidates(json.dumps(payload))
-    assert markdown == "## Picks"
+    payload = {"candidates": [{"a": 1}]}
+    candidates = _parse_candidates(json.dumps(payload))
     assert candidates == [{"a": 1}]
 
 
@@ -187,14 +183,9 @@ def test_parse_candidates_rejects_non_object():
         _parse_candidates(json.dumps([1, 2, 3]))
 
 
-def test_parse_candidates_rejects_missing_markdown():
-    with pytest.raises(ProposeValidationError, match="candidate_list_markdown"):
-        _parse_candidates(json.dumps({"candidates": []}))
-
-
 def test_parse_candidates_rejects_non_list_candidates():
     with pytest.raises(ProposeValidationError, match="not a JSON array"):
-        _parse_candidates(json.dumps({"candidate_list_markdown": "x", "candidates": "not a list"}))
+        _parse_candidates(json.dumps({"candidates": "not a list"}))
 
 
 # --- _validate_candidates tests --------------------------------------------
@@ -278,6 +269,123 @@ def test_validate_rejects_all_hard():
         _validate_candidates(candidates)
 
 
+# --- _render_propose_html tests ---------------------------------------------
+# docs/telegram-formatting.md §3.4: every message type gets a test that feeds
+# inputs containing every Telegram-HTML special character plus the MarkdownV2
+# escape characters that were leaking, and asserts no `\.`, `\-` artifacts.
+
+
+def test_render_propose_html_basic_structure():
+    """The card has the header, hyperlinks, badges, and blockquotes."""
+    candidates = [
+        _valid_candidate("two-sum", "easy"),
+        _valid_candidate("merge-intervals", "medium"),
+        _valid_candidate("binary-search", "hard"),
+    ]
+    html_card = _render_propose_html(candidates)
+    assert html_card.startswith("<b>📊 Today's Problems</b>")
+    assert '<a href="https://leetcode.com/problems/two-sum/">' in html_card
+    assert "🟢" in html_card  # easy
+    assert "🟡" in html_card  # medium
+    assert "🔴" in html_card  # hard
+    assert "<blockquote>" in html_card
+    assert "<b>Why:</b>" in html_card
+    assert "<b>Hint:</b>" in html_card
+
+
+def test_render_propose_html_escapes_special_characters():
+    """LLM-derived fields with `<`, `>`, `&` must be html.escape'd so the
+    card parses as valid Telegram HTML. Regression for the latent bug where
+    the coach feedback was sent unescaped (docs/telegram-formatting.md §3.2.3).
+    """
+    candidates = [
+        {
+            "slug": "x",
+            "title": "A < B & C > D",
+            "url": "https://leetcode.com/problems/x/",
+            "tags": "array<hash>",
+            "difficulty": "easy",
+            "reasoning": "if x < y then y > x & z",
+            "coaching_hint": "use a < b",
+        }
+    ]
+    html_card = _render_propose_html(candidates)
+    # The raw special characters must NOT appear unescaped inside the
+    # interpolated content (they're inside HTML tags/attributes).
+    assert "A < B" not in html_card  # the title's `<` must be escaped
+    assert "A &lt; B" in html_card
+    assert "B &amp; C" in html_card
+    assert "C &gt; D" in html_card
+    # The reasoning's `<`, `>`, `&` must be escaped too.
+    assert "x &lt; y" in html_card
+    assert "y &gt; x" in html_card
+    assert "x &amp; z" in html_card
+
+
+def test_render_propose_html_no_markdownv2_escape_leaks():
+    r"""The old plain-text send leaked `\.` and `\-` (MarkdownV2 escapes) into
+    the user-facing message. The HTML card must never contain backslash-escapes
+    even when titles contain `.`, `-`, `(`, `)`, `!`, `*`.
+
+    Regression for the user-reported bug (docs/telegram-formatting.md §1).
+    """
+    candidates = [
+        {
+            "slug": "string-to-integer-atoi",
+            "title": "String to Integer (atoi)",
+            "url": "https://leetcode.com/problems/string-to-integer-atoi/",
+            "tags": "string,math",
+            "difficulty": "medium",
+            "reasoning": "parse phases.",
+            "coaching_hint": "handle overflow!",
+        }
+    ]
+    html_card = _render_propose_html(candidates)
+    # No MarkdownV2 escape artifacts.
+    assert "\\." not in html_card
+    assert "\\-" not in html_card
+    assert "\\(" not in html_card
+    assert "\\)" not in html_card
+    # The title's special characters must appear UNescaped (they're content,
+    # not HTML markup) — html.escape only touches <, >, &, not . - ( ) !.
+    assert "String to Integer (atoi)" in html_card
+    assert "leetcode.com/problems/string-to-integer-atoi/" in html_card
+
+
+def test_render_propose_html_parses_with_html_parser():
+    """The rendered card must parse as valid HTML (no unclosed tags, no
+    stray < or >). Uses the stdlib HTMLParser as a proxy for Telegram's
+    parser.
+    """
+    from html.parser import HTMLParser
+
+    class _Collector(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.errors: list[str] = []
+
+        def error(self, message):  # pragma: no cover — HTMLParser.error is unused
+            self.errors.append(message)
+
+    candidates = [
+        {
+            "slug": "x",
+            "title": "A < B & C",
+            "url": "https://leetcode.com/problems/x/",
+            "tags": "a&b",
+            "difficulty": "easy",
+            "reasoning": "x < y & z",
+            "coaching_hint": "if a > b",
+        }
+    ]
+    html_card = _render_propose_html(candidates)
+    collector = _Collector()
+    # feed() raises on malformed HTML in Python 3.12+; older versions just
+    # log. Either way, no exception means the card is well-formed enough.
+    collector.feed(html_card)
+    collector.close()
+
+
 # --- Full flow test (mocked LLM + Telegram) --------------------------------
 
 
@@ -347,7 +455,6 @@ async def test_propose_5_end_to_end(sqlite_session_factory, monkeypatch):
     mock_llm_response = LLMResponse(
         text=json.dumps(
             {
-                "candidate_list_markdown": "1. *Two Sum*\n2. *Merge Intervals*\n3. ...",
                 "candidates": mock_candidates,
             }
         ),
@@ -364,22 +471,40 @@ async def test_propose_5_end_to_end(sqlite_session_factory, monkeypatch):
     )
 
     # chat_id "123456" is accepted by the telegram_test_settings fixture in conftest.py.
-    markdown = await propose_5(llm=mock_llm, chat_id="123456")
-    assert "Two Sum" in markdown
+    html_card = await propose_5(llm=mock_llm, chat_id="123456")
+    assert "Two Sum" in html_card
     assert mock_llm.complete.called
     # Verify the system prompt was the propose prompt (contains "LeetCode coach").
     call_args = mock_llm.complete.call_args
     assert "leetcode coach" in call_args.args[0].lower()
-    # Flow A sends the LLM's markdown as PLAIN TEXT (no parse_mode). Sending
-    # with parse_mode="MarkdownV2" breaks on real LeetCode titles that
-    # contain `-`, `.`, `(`, `)` (Telegram requires those escaped in V2).
-    # Phase 9 issue #044 replaces this with an HTML card.
-    tg_request = respx.calls.last.request
+    # Flow A sends an HTML card (parse_mode="HTML"). The previous plain-text
+    # send leaked MarkdownV2 escape artifacts (`\.`, `\-`) into the message
+    # because the LLM was told to emit MarkdownV2 but parse_mode was omitted.
+    # See docs/telegram-formatting.md §3.2.1.
+    # The card is the first sendMessage call; later calls (progress summary,
+    # pinned refresh) come after. Check the first call, not the last.
+    tg_request = respx.calls[0].request
     tg_body = tg_request.read()
-    assert b"parse_mode" not in tg_body, (
-        "Flow A must send plain text (no parse_mode); MarkdownV2 breaks on "
-        "real LeetCode titles. See issue #044 for the HTML card replacement."
+    assert b"parse_mode" in tg_body and b"HTML" in tg_body, (
+        "Flow A must send the HTML card with parse_mode=HTML; the plain-text "
+        "send leaked MarkdownV2 escapes. See docs/telegram-formatting.md."
     )
+    # The card must contain the expected HTML structure. Parse the JSON body
+    # to check the decoded text (the body is JSON-encoded with
+    # ensure_ascii=True, so emojis appear as \udXXX surrogate pairs and `"`
+    # inside HTML appears as `\"` in the raw body).
+    tg_payload = json.loads(tg_body.decode())
+    tg_text = tg_payload["text"]
+    assert tg_payload["parse_mode"] == "HTML"
+    assert tg_text.startswith("<b>📊 Today's Problems</b>")
+    assert '<a href="https://leetcode.com/problems/' in tg_text  # hyperlinks
+    # Difficulty badges for the 5-candidate mix (1 easy + 2 medium + 2 hard).
+    assert "🟢" in tg_text  # easy badge
+    assert "🟡" in tg_text  # medium badge
+    assert "🔴" in tg_text  # hard badge
+    # No MarkdownV2 escape artifacts should leak into the rendered card.
+    assert "\\." not in tg_text
+    assert "\\-" not in tg_text
 
 
 @pytest.mark.asyncio
@@ -398,7 +523,6 @@ async def test_propose_5_rejects_invalid_llm_output(sqlite_session_factory):
         return_value=LLMResponse(
             text=json.dumps(
                 {
-                    "candidate_list_markdown": "1. ...",
                     "candidates": [_valid_candidate(f"a{i}") for i in range(3)],
                 }
             ),

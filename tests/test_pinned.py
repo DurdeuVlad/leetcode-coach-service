@@ -98,7 +98,6 @@ def _insert_pending_review(
         session.add(
             db_models.PendingReview(
                 message_id=message_id,
-                google_task_id="t1",
                 problem_slug=slug,
                 problem_title=slug.replace("-", " ").title(),
                 proposed_at=today,
@@ -160,24 +159,26 @@ def test_snapshot_shows_counts_and_streak(sqlite_engine):
 
     snapshot = _build_snapshot()
 
-    assert "Proposed: 5" in snapshot
-    assert "Picked: 1" in snapshot
-    assert "Coached: 1" in snapshot
-    assert "Expired: 1" in snapshot
-    assert "Active lessons: 1" in snapshot
-    assert "Streak: 1 day" in snapshot
+    assert "Proposed: <b>5</b>" in snapshot
+    assert "Picked: <b>1</b>" in snapshot
+    assert "Coached: <b>1</b>" in snapshot
+    assert "Expired: <b>1</b>" in snapshot
+    assert "Active lessons: <b>1</b>" in snapshot
+    assert "Streak: <b>1</b> day" in snapshot
+    # Phase 9: snapshot is now HTML-formatted (docs/telegram-formatting.md §3.2.4).
+    assert snapshot.startswith("📊 <b>Today's Progress</b>")
 
 
 def test_snapshot_empty_db(sqlite_engine):
     """Snapshot on an empty DB shows all zeros, streak 0."""
     snapshot = _build_snapshot()
 
-    assert "Proposed: 0" in snapshot
-    assert "Picked: 0" in snapshot
-    assert "Coached: 0" in snapshot
-    assert "Expired: 0" in snapshot
-    assert "Active lessons: 0" in snapshot
-    assert "Streak: 0 days" in snapshot
+    assert "Proposed: <b>0</b>" in snapshot
+    assert "Picked: <b>0</b>" in snapshot
+    assert "Coached: <b>0</b>" in snapshot
+    assert "Expired: <b>0</b>" in snapshot
+    assert "Active lessons: <b>0</b>" in snapshot
+    assert "Streak: <b>0</b> days" in snapshot
 
 
 # ===========================================================================
@@ -193,9 +194,11 @@ async def test_first_refresh_creates_and_pins(sqlite_engine, monkeypatch):
         lambda: type("S", (), {"telegram_chat_id": "123"})(),
     )
     sent_texts = []
+    sent_kwargs = []
 
     async def _fake_send(chat_id, text, **kw):
         sent_texts.append(text)
+        sent_kwargs.append(kw)
         return 999  # fake message_id
 
     with (
@@ -206,6 +209,9 @@ async def test_first_refresh_creates_and_pins(sqlite_engine, monkeypatch):
 
     assert len(sent_texts) == 1
     pin_mock.assert_awaited_once_with("123", 999)
+    # Phase 9: the pinned snapshot is HTML-formatted
+    # (docs/telegram-formatting.md §3.2.4).
+    assert sent_kwargs[0].get("parse_mode") == "HTML"
 
     # Verify the ID was stored in bot_state.
     from leetcode_coach.db.queries import get_state
@@ -243,6 +249,9 @@ async def test_subsequent_refresh_edits_existing(sqlite_engine, monkeypatch):
     call_args = edit_mock.await_args
     assert call_args.args[0] == "123"  # chat_id
     assert call_args.args[1] == 555  # message_id
+    # Phase 9: the edit must use parse_mode="HTML"
+    # (docs/telegram-formatting.md §3.2.4).
+    assert call_args.kwargs.get("parse_mode") == "HTML"
     send_mock.assert_not_called()  # no new message created
     pin_mock.assert_not_called()
 

@@ -25,8 +25,9 @@ Implement what the docs say.
    behavioral contract. What the system must do. **This is the source of
    truth for behavior.** If code and this doc disagree, the doc wins.
 3. [`docs/architecture.md`](./docs/architecture.md) — the design. How the
-   system does it. Stack, repo layout, LLM client design, Google auth
-   branch, schema, env vars, deploy.
+   system does it. Stack, repo layout, LLM client design, schema, env vars,
+   deploy. (The Google auth branch was removed 2026-07-31 — see
+   `docs/business-requirements.md` §8 decision 5.)
 4. [`docs/roadmap.md`](./docs/roadmap.md) — the 8-phase plan. Each phase
    has explicit exit criteria. Do not skip phases; each one ships something
    the next phase depends on.
@@ -56,8 +57,10 @@ Implement what the docs say.
   bug, fix it in `docs/business-requirements.md` first, then in
   `src/leetcode_coach/prompts/`, with a commit message that names the bug.
   The n8n audit already identified the prompt-adjacent bugs (missing
-  unsolved pool, missing Google Task notes append); those are called out
-  in `docs/roadmap.md` Phase 2 and Phase 3b.
+  unsolved pool, ~~missing Google Task notes append~~); those are called out
+  in `docs/roadmap.md` Phase 2 and Phase 3b. (The Google Task notes-append
+  bug is moot as of 2026-07-31 — the integration was removed; see
+  `docs/business-requirements.md` §8 decision 5.)
 - **Do not add Celery, Redis, a task queue, a separate worker process, an
   LLM tool-calling loop, multi-user support, a web UI, or Browserless/
   SearXNG integrations in v1.** `docs/architecture.md` §12 and
@@ -84,9 +87,11 @@ Implement what the docs say.
   the choices are documented and deliberate.
 - **Port prompts verbatim.** See above.
 - **Close the three n8n error-handling gaps for free** by relying on
-  `tenacity` (retries default-on), typed exceptions (the Google auth
-  branch), and FastAPI's normal error handling (the Telegram webhook
-  route). These are not separate work items.
+  `tenacity` (retries default-on), typed exceptions, and FastAPI's normal
+  error handling (the Telegram webhook route). These are not separate work
+  items. (The Google auth typed-exception branch was removed 2026-07-31
+  along with the integration — see `docs/business-requirements.md` §8
+  decision 5.)
 - **Update `docs/roadmap.md` checkboxes** as you complete phase items.
   Mark the phase's todo `[x]` only when its exit criteria are met.
 
@@ -96,25 +101,16 @@ Implement what the docs say.
    unsolved problem pool to choose from — it only saw `solved = true`
    rows. The Python port must read `leetcode_problems WHERE solved = false`
    and pass that into the propose prompt. Regression test in Phase 2.
-2. **The Google Task notes-append bug.** The n8n Flow B `mark complete`
-   node dropped the coach feedback from the task notes. The Python port
-   must call `google_tasks.mark_complete(task_id, notes_append=feedback)`
-   — append, not replace. Regression test in Phase 3b.
-3. **The Google auth 7-day expiry.** Root cause is the GCP OAuth consent
-   screen being in `Testing` status. The fix is to flip it to
-   `In production` (single-user personal use, no verification needed).
-   Documented in `n8n-reference/README.md` lines 325-353 and
-   `docs/architecture.md` §6. Phase 6 includes this flip.
-4. **Lesson graduation is double-gated.** Coach says
+2. **Lesson graduation is double-gated.** Coach says
    `lesson_should_graduate = true` **AND** the DB row's
    `times_reinforced >= 5`. Read the count from the DB, not from the
    coach. The coach hallucinating a count is a known failure mode.
-5. **The 5-list candidate array must be persisted somewhere Flow B can
+3. **The 5-list candidate array must be persisted somewhere Flow B can
    read it.** The n8n version used a Data Table; the Python port needs
    either a `daily_candidates` table or `pending_review` rows pre-inserted
    with `status = proposed`. Phase 3a of the roadmap flags this as a
    decision to make in that phase. Don't punt it.
-6. **Timezone is Europe/Bucharest.** All cron jobs use it. All dates in
+4. **Timezone is Europe/Bucharest.** All cron jobs use it. All dates in
    the DB are `DATE` (not `TIMESTAMPTZ`) because the system is
    single-timezone. See `docs/architecture.md` §7.
 

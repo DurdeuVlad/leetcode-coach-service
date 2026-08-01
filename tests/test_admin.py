@@ -18,7 +18,7 @@ from __future__ import annotations
 import datetime
 import json
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import FastAPI
@@ -279,26 +279,23 @@ def test_propose_persists_candidates_to_db(client, sqlite_session_factory, monke
 
 
 def test_pick_creates_pending_review_rows(client, sqlite_session_factory, monkeypatch):
-    """POST /admin/pick creates pending_review rows + Google Tasks, returns threads."""
+    """POST /admin/pick creates pending_review rows, returns threads."""
     _insert_problems(sqlite_session_factory)
     monkeypatch.setattr(flow_a, "LLMClient", lambda: _mock_llm_propose())
 
     # First run propose to populate daily_candidates.
     client.post("/admin/propose", headers={"X-Admin-Api-Key": TEST_KEY})
 
-    # Mock Google Tasks create_task.
-    with patch.object(flow_b, "create_task", AsyncMock(return_value="task-xyz")):
-        resp = client.post(
-            "/admin/pick",
-            json={"picks": [1, 2]},
-            headers={"X-Admin-Api-Key": TEST_KEY},
-        )
+    resp = client.post(
+        "/admin/pick",
+        json={"picks": [1, 2]},
+        headers={"X-Admin-Api-Key": TEST_KEY},
+    )
 
     assert resp.status_code == 200
     body = resp.json()
     assert len(body["picked"]) == 2
     assert body["picked"][0]["problem_slug"] == "two-sum"
-    assert body["picked"][0]["task_id"] == "task-xyz"
     assert body["picked"][0]["message_id"] == -1  # dry_run
 
     # Verify pending_review rows in DB.
@@ -315,12 +312,11 @@ def test_pick_empty_returns_empty_list(client, sqlite_session_factory, monkeypat
     monkeypatch.setattr(flow_a, "LLMClient", lambda: _mock_llm_propose())
     client.post("/admin/propose", headers={"X-Admin-Api-Key": TEST_KEY})
 
-    with patch.object(flow_b, "create_task", AsyncMock()):
-        resp = client.post(
-            "/admin/pick",
-            json={"picks": []},
-            headers={"X-Admin-Api-Key": TEST_KEY},
-        )
+    resp = client.post(
+        "/admin/pick",
+        json={"picks": []},
+        headers={"X-Admin-Api-Key": TEST_KEY},
+    )
     assert resp.status_code == 200
     assert resp.json()["picked"] == []
 
@@ -335,25 +331,23 @@ def test_coach_returns_feedback_and_lesson(client, sqlite_session_factory, monke
 
     # Propose + pick to create a pending_review row.
     client.post("/admin/propose", headers={"X-Admin-Api-Key": TEST_KEY})
-    with patch.object(flow_b, "create_task", AsyncMock(return_value="task-xyz")):
-        pick_resp = client.post(
-            "/admin/pick",
-            json={"picks": [1]},
-            headers={"X-Admin-Api-Key": TEST_KEY},
-        )
+    pick_resp = client.post(
+        "/admin/pick",
+        json={"picks": [1]},
+        headers={"X-Admin-Api-Key": TEST_KEY},
+    )
     pending_review_id = pick_resp.json()["picked"][0]["pending_review_id"]
 
-    # Mock the coach LLM + Google Tasks mark_complete.
+    # Mock the coach LLM.
     monkeypatch.setattr(flow_b, "LLMClient", lambda: _mock_llm_coach())
-    with patch.object(flow_b, "mark_complete", AsyncMock()):
-        resp = client.post(
-            "/admin/coach",
-            json={
-                "pending_review_id": pending_review_id,
-                "code": "class Solution { def twoSum(self, nums, target): ... }",
-            },
-            headers={"X-Admin-Api-Key": TEST_KEY},
-        )
+    resp = client.post(
+        "/admin/coach",
+        json={
+            "pending_review_id": pending_review_id,
+            "code": "class Solution { def twoSum(self, nums, target): ... }",
+        },
+        headers={"X-Admin-Api-Key": TEST_KEY},
+    )
 
     assert resp.status_code == 200
     body = resp.json()
@@ -370,12 +364,11 @@ def test_coach_returns_feedback_and_lesson(client, sqlite_session_factory, monke
 def test_coach_404_on_missing_pending_review(client, sqlite_session_factory, monkeypatch):
     """POST /admin/coach with a non-existent pending_review_id → 404."""
     monkeypatch.setattr(flow_b, "LLMClient", lambda: _mock_llm_coach())
-    with patch.object(flow_b, "mark_complete", AsyncMock()):
-        resp = client.post(
-            "/admin/coach",
-            json={"pending_review_id": 99999, "code": "print('hello')"},
-            headers={"X-Admin-Api-Key": TEST_KEY},
-        )
+    resp = client.post(
+        "/admin/coach",
+        json={"pending_review_id": 99999, "code": "print('hello')"},
+        headers={"X-Admin-Api-Key": TEST_KEY},
+    )
     assert resp.status_code == 404
 
 
@@ -385,20 +378,18 @@ def test_coach_by_problem_slug(client, sqlite_session_factory, monkeypatch):
     monkeypatch.setattr(flow_a, "LLMClient", lambda: _mock_llm_propose())
 
     client.post("/admin/propose", headers={"X-Admin-Api-Key": TEST_KEY})
-    with patch.object(flow_b, "create_task", AsyncMock(return_value="task-xyz")):
-        client.post(
-            "/admin/pick",
-            json={"picks": [1]},
-            headers={"X-Admin-Api-Key": TEST_KEY},
-        )
+    client.post(
+        "/admin/pick",
+        json={"picks": [1]},
+        headers={"X-Admin-Api-Key": TEST_KEY},
+    )
 
     monkeypatch.setattr(flow_b, "LLMClient", lambda: _mock_llm_coach())
-    with patch.object(flow_b, "mark_complete", AsyncMock()):
-        resp = client.post(
-            "/admin/coach",
-            json={"problem_slug": "two-sum", "code": "solution here"},
-            headers={"X-Admin-Api-Key": TEST_KEY},
-        )
+    resp = client.post(
+        "/admin/coach",
+        json={"problem_slug": "two-sum", "code": "solution here"},
+        headers={"X-Admin-Api-Key": TEST_KEY},
+    )
 
     assert resp.status_code == 200
     assert resp.json()["status"] == "solved"
@@ -418,24 +409,22 @@ def test_full_pipeline_propose_pick_coach(client, sqlite_session_factory, monkey
     assert len(r1.json()["candidates"]) == 5
 
     # Step 2: pick problems 1 and 2.
-    with patch.object(flow_b, "create_task", AsyncMock(return_value="task-xyz")):
-        r2 = client.post(
-            "/admin/pick",
-            json={"picks": [1, 2]},
-            headers={"X-Admin-Api-Key": TEST_KEY},
-        )
+    r2 = client.post(
+        "/admin/pick",
+        json={"picks": [1, 2]},
+        headers={"X-Admin-Api-Key": TEST_KEY},
+    )
     assert r2.status_code == 200
     assert len(r2.json()["picked"]) == 2
     pr_id = r2.json()["picked"][0]["pending_review_id"]
 
     # Step 3: coach the first submission.
     monkeypatch.setattr(flow_b, "LLMClient", lambda: _mock_llm_coach())
-    with patch.object(flow_b, "mark_complete", AsyncMock()):
-        r3 = client.post(
-            "/admin/coach",
-            json={"pending_review_id": pr_id, "code": "my solution"},
-            headers={"X-Admin-Api-Key": TEST_KEY},
-        )
+    r3 = client.post(
+        "/admin/coach",
+        json={"pending_review_id": pr_id, "code": "my solution"},
+        headers={"X-Admin-Api-Key": TEST_KEY},
+    )
     assert r3.status_code == 200
     body = r3.json()
     assert body["solved"] is True

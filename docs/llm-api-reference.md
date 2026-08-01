@@ -315,6 +315,7 @@ POST /admin/coach     → 200, coach feedback persisted, lesson tracked
 
 Each call is independent against the DB state, so the external tester
 can run them in order or retry a failed step. The `dry_run=True` flag is
-the only difference from the production path — the LLM prompts, DB
-writes, and Google Tasks calls are identical to what cron + Telegram
-would trigger.
+the only difference from the production path — the LLM prompts and DB
+writes are identical to what cron + Telegram would trigger. (Google
+Tasks calls were removed 2026-07-31 — see `business-requirements.md` §8
+decision 5.)

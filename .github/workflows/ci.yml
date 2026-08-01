@@ -43,11 +43,6 @@ jobs:
       GEMINI_API_KEY: test-key
       TELEGRAM_CHAT_ID: "123456"
       LEETCODE_USERNAME: test-user
-      # Google Tasks — required by Settings() at import time; test placeholders.
-      GOOGLE_CLIENT_ID: test-client-id
-      GOOGLE_CLIENT_SECRET: test-client-secret
-      GOOGLE_REFRESH_TOKEN: test-refresh-token
-      GOOGLE_TASKS_LIST_ID: test-task-list-id
       TIMEZONE: Europe/Bucharest
 
     steps:

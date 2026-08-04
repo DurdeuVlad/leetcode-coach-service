@@ -1,7 +1,12 @@
 # Architecture — LeetCode Coach Service
 
-Status: design | Owner: Vlad | Last revised: 2026-07-26
-Companion to `business-requirements.md` (the contract) and `roadmap.md` (the plan).
+> **Status: V1 historical design — superseded 2026-08-03.**
+>
+> The authoritative V2 architecture is [`agentic-v2.md`](./agentic-v2.md).
+> Its single Terra controller, bounded tools, one-shot Sol advisor, approval
+> state, fresh schema, and OpenAI-only policy override conflicting V1 sections,
+> especially §5 and §12. This document remains to explain the V1 deployment
+> and aid the learning-data migration; it is not an implementation target.
 
 ## 1. Why a Python service, not n8n
 

@@ -1,9 +1,13 @@
 # Business Requirements — LeetCode Coach
 
-Status: canonical spec | Owner: Vlad | Last revised: 2026-07-26
-Source: extracted from `n8n-reference/README.md` (v3), stripped of n8n-specific framing.
-This document is the behavioral contract. Architecture lives in `architecture.md`;
-delivery plan lives in `roadmap.md`.
+> **Status: V1 historical record — superseded 2026-08-03.**
+>
+> This document records the original port contract. The canonical behavioral
+> contract is now [`agentic-v2.md`](./agentic-v2.md); its requirements override
+> every conflicting statement below, including V1's prohibition on an LLM
+> tool-calling loop, Gemini fallback, and four-table schema. Keep this material
+> for migration provenance and behavior comparison only. Do not implement new
+> work from it.
 
 ## 1. Purpose
 

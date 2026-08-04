@@ -26,6 +26,7 @@ import datetime
 import html as html_lib
 import re
 import sys
+from contextlib import suppress
 
 import structlog
 from sqlmodel import select
@@ -33,10 +34,10 @@ from telegram import Update
 
 from leetcode_coach.config import get_settings
 from leetcode_coach.db.base import get_session
-from leetcode_coach.db.models import LeetCodeProblem, PendingReview
-from leetcode_coach.flows import flow_a, flow_b
+from leetcode_coach.db.models import PendingReview
 from leetcode_coach.flows import commands as commands_mod
 from leetcode_coach.flows import expiry as expiry_mod
+from leetcode_coach.flows import flow_a, flow_b
 from leetcode_coach.flows import pinned as pinned_mod
 from leetcode_coach.integrations import llm as llm_mod
 from leetcode_coach.integrations import telegram as tg_mod
@@ -511,10 +512,8 @@ async def main() -> None:
     # crash with UnicodeEncodeError. `errors="replace"` is a last-resort
     # guard for terminals that still can't render a glyph.
     for stream in (sys.stdout, sys.stderr):
-        try:
+        with suppress(AttributeError, OSError):
             stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
-        except (AttributeError, OSError):
-            pass
 
     _patch_telegram_outbound()
     chat_id = await _preflight()

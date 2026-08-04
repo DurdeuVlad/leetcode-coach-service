@@ -47,5 +47,9 @@ async def test_sol_advisor_makes_one_toolless_structured_call(
     assert received["model"] == "gpt-5.6-sol"
     assert received["store"] is False
     assert "tools" not in received
-    assert received["client_kwargs"] == {"api_key": "dotenv-key"}
+    assert received["client_kwargs"] == {
+        "api_key": "dotenv-key",
+        "timeout": 90.0,
+        "max_retries": 2,
+    }
     assert advice.suggested_next_action == "Request the failing test."

@@ -46,10 +46,13 @@ processed update_ids 777, 880, and 881 all handled
 House Robber = easy; invented slug absent
 ```
 
-The full automated suite passed: `216 passed`. Request-level Bot API tests verify
+The full automated suite passed: `228 passed`. Request-level Bot API tests verify
 send, HTML/buttons, edit, callback acknowledgement, webhook secret registration,
 Telegram's post-entity 4,096-character limit, 64-byte callback limit, HTTPS and
 secret-token constraints, visible hard failures, and three-attempt transient retry.
+Crash-recovery regressions also verify the update claim lease, in-flight 503
+responses, pending-approval serialization, superseded alias expiry, harmless
+stale callbacks, bounded read-tool projections, and unbounded opaque SDK state storage.
 The real PostgreSQL run verified
 all Telegram identifiers as `BIGINT`/`BIGSERIAL`, including the configured
 REDACTED_CHAT_ID chat ID, opaque run state as `TEXT`, and zero leaked advisory

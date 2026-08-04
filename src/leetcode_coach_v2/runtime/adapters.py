@@ -9,13 +9,11 @@ import secrets
 from decimal import Decimal
 from typing import Any
 
-import httpx
 from sqlalchemy import delete, func
 from sqlmodel import Session, select
 
 from leetcode_coach_v2.agent.contracts import JsonObject
 from leetcode_coach_v2.agent.state import PendingApproval, SerializedRunState
-from leetcode_coach_v2.config import get_settings
 from leetcode_coach_v2.db.models import (
     AgentRunStatus,
     ApprovalStatus,
@@ -47,6 +45,56 @@ def _jsonable(value: Any) -> Any:
     if isinstance(value, dict):
         return {str(key): _jsonable(item) for key, item in value.items()}
     return value
+
+
+def _clip(value: Any, limit: int) -> str:
+    text = str(value or "")
+    return text if len(text) <= limit else f"{text[: limit - 1]}…"
+
+
+def _problem_view(problem: V2Problem) -> JsonObject:
+    return {
+        "slug": problem.slug,
+        "title": problem.title,
+        "url": problem.url,
+        "difficulty": getattr(problem.difficulty, "value", problem.difficulty),
+        "tags": _clip(problem.tags, 300),
+        "solved": problem.solved,
+        "eligible": problem.eligible,
+        "times_attempted": problem.times_attempted,
+        "last_attempted": _jsonable(problem.last_attempted),
+    }
+
+
+def _attempt_view(attempt: V2Attempt) -> JsonObject:
+    return {
+        "id": attempt.id,
+        "problem_slug": attempt.problem_slug,
+        "attempted_on": attempt.attempted_on.isoformat(),
+        "outcome": attempt.outcome,
+        "feedback": _clip(attempt.feedback, 500),
+        "time_spent_min": attempt.time_spent_min,
+    }
+
+
+def _lesson_view(lesson: V2Lesson) -> JsonObject:
+    return {
+        "id": lesson.id,
+        "title": lesson.title,
+        "category": lesson.category,
+        "active": lesson.active,
+        "times_reinforced": lesson.times_reinforced,
+    }
+
+
+def _review_view(review: V2PendingReview) -> JsonObject:
+    return {
+        "id": review.id,
+        "problem_slug": review.problem_slug,
+        "batch_id": review.batch_id,
+        "proposed_on": review.proposed_on.isoformat(),
+        "status": getattr(review.status, "value", review.status),
+    }
 
 
 class SQLCoachDomainAdapter:
@@ -86,7 +134,10 @@ class SQLCoachDomainAdapter:
                 .order_by(V2Attempt.id.desc())
                 .limit(30)
             ).all()
-            return {"active_lessons": _jsonable(lessons), "recent_attempts": _jsonable(attempts)}
+            return {
+                "active_lessons": [_lesson_view(row) for row in lessons],
+                "recent_attempts": [_attempt_view(row) for row in attempts],
+            }
 
         return await self._read(query)
 
@@ -124,7 +175,7 @@ class SQLCoachDomainAdapter:
                     max(1, min(limit, 20))
                 )
             ).all()
-            return _jsonable(rows)
+            return [_problem_view(row) for row in rows]
 
         return await self._read(query)
 
@@ -133,7 +184,7 @@ class SQLCoachDomainAdapter:
 
         def query(session: Session):
             problem = session.get(V2Problem, slug)
-            return _jsonable(problem) if problem is not None else None
+            return _problem_view(problem) if problem is not None else None
 
         return await self._read(query)
 
@@ -145,7 +196,7 @@ class SQLCoachDomainAdapter:
                     V2PendingReview.status == ReviewStatus.OPEN,
                 )
             ).all()
-            return {"reviews": _jsonable(reviews)}
+            return {"reviews": [_review_view(row) for row in reviews]}
 
         return await self._read(query)
 
@@ -171,8 +222,8 @@ class SQLCoachDomainAdapter:
                 elif attempted_on < cursor:
                     break
             return {
-                "recent_attempts": _jsonable(attempts),
-                "active_lessons": _jsonable(lessons),
+                "recent_attempts": [_attempt_view(row) for row in attempts],
+                "active_lessons": [_lesson_view(row) for row in lessons],
                 "credit_balance": str(balance),
                 "streak_days": streak,
             }
@@ -180,23 +231,10 @@ class SQLCoachDomainAdapter:
         return await self._read(query)
 
     async def get_walkthroughs(self, *, chat_id: int, slug: str) -> list[JsonObject]:
-        del chat_id
-        settings = get_settings()
-        if not settings.searxng_url:
-            return []
-        problem = await self.get_problem(chat_id=0, slug=slug)
-        if problem is None:
-            return []
-        async with httpx.AsyncClient(timeout=15) as client:
-            response = await client.get(
-                f"{settings.searxng_url.rstrip('/')}/search",
-                params={"q": f"{problem['title']} LeetCode walkthrough", "format": "json"},
-            )
-            response.raise_for_status()
-        return [
-            {"title": str(row.get("title", ""))[:300], "url": str(row.get("url", ""))[:1000]}
-            for row in response.json().get("results", [])[:3]
-        ]
+        # V2 intentionally has no Browserless/SearXNG dependency. Keep the
+        # typed tool deterministic until a first-party tutorial source exists.
+        await self.get_problem(chat_id=chat_id, slug=slug)
+        return []
 
     async def draft_proposal(self, *, chat_id: int, selections: list[JsonObject]) -> JsonObject:
         parsed = [
@@ -297,6 +335,15 @@ class SQLRunStateRepository:
                 for old in old_runs:
                     old.status = AgentRunStatus.FAILED
                     old.completed_at = utcnow()
+                    old_approvals = session.exec(
+                        select(V2PendingApproval).where(
+                            V2PendingApproval.agent_run_id == old.id,
+                            V2PendingApproval.status == ApprovalStatus.PENDING,
+                        )
+                    ).all()
+                    for approval in old_approvals:
+                        approval.status = ApprovalStatus.EXPIRED
+                        approval.resolved_at = utcnow()
                 row = V2AgentRun(
                     id=state.run_id,
                     chat_id=state.chat_id,

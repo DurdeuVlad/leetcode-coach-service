@@ -34,9 +34,6 @@ class V2Settings(BaseSettings):
     prompt_cache_ttl: str = "30m"
 
     timezone: str = "Europe/Bucharest"
-    searxng_url: str = ""
-    browserless_url: str = ""
-    browserless_token: str = ""
     leetcode_username: str = ""
     log_level: str = "INFO"
 

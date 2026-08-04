@@ -4,6 +4,7 @@ import pytest
 from pydantic import ValidationError
 
 from leetcode_coach_v2.agent.orchestrator import (
+    AGENT_RUN_TIMEOUT_SECONDS,
     MAX_READ_TOOL_CONCURRENCY,
     MAX_TURNS,
     TERRA_MODEL,
@@ -58,6 +59,7 @@ def test_runner_config_caps_local_tool_concurrency() -> None:
     config = TerraCoachRunner(object()).run_config()
     assert config.tool_execution.max_function_tool_concurrency == MAX_READ_TOOL_CONCURRENCY
     assert MAX_TURNS == 8
+    assert AGENT_RUN_TIMEOUT_SECONDS == 600
 
 
 def test_settings_adapt_v2_config_and_keep_the_hard_turn_limit() -> None:
@@ -106,12 +108,27 @@ def test_usage_metrics_records_cache_reads_and_writes() -> None:
 
 
 def test_configured_openai_key_is_injected_into_agents_sdk(monkeypatch) -> None:
-    captured = []
-    monkeypatch.setattr(agents, "set_default_openai_key", captured.append)
+    captured = {}
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            captured["client_kwargs"] = kwargs
+
+    def fake_set_client(client, *, use_for_tracing):
+        captured["client"] = client
+        captured["use_for_tracing"] = use_for_tracing
+
+    monkeypatch.setattr("openai.AsyncOpenAI", FakeClient)
+    monkeypatch.setattr(agents, "set_default_openai_client", fake_set_client)
 
     configure_openai_sdk("configured-through-dotenv")
 
-    assert captured == ["configured-through-dotenv"]
+    assert captured["client_kwargs"] == {
+        "api_key": "configured-through-dotenv",
+        "timeout": 90.0,
+        "max_retries": 2,
+    }
+    assert captured["use_for_tracing"] is True
 
 
 def test_tool_schemas_do_not_expose_runtime_context() -> None:

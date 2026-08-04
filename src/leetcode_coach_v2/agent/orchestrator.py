@@ -22,6 +22,7 @@ MAX_TURNS = 8
 MAX_READ_TOOL_CONCURRENCY = 3
 READ_TOOL_TIMEOUT_SECONDS = 20
 WRITE_TOOL_TIMEOUT_SECONDS = 30
+AGENT_RUN_TIMEOUT_SECONDS = 600
 
 if TYPE_CHECKING:
     from agents.memory.session import Session
@@ -525,13 +526,16 @@ class TerraCoachRunner:
     ) -> AgentRunOutcome:
         agent = create_terra_agent(self._settings)
         _Agent, _ModelSettings, _RunConfig, Runner, _ToolExecutionConfig, _function_tool = _sdk()
-        result = await Runner.run(
-            agent,
-            self._input(message),
-            context=context,
-            max_turns=self._settings.max_turns,
-            run_config=self.run_config(),
-            session=session,
+        result = await asyncio.wait_for(
+            Runner.run(
+                agent,
+                self._input(message),
+                context=context,
+                max_turns=self._settings.max_turns,
+                run_config=self.run_config(),
+                session=session,
+            ),
+            timeout=AGENT_RUN_TIMEOUT_SECONDS,
         )
         return await self._outcome(result=result, context=context)
 
@@ -582,7 +586,10 @@ class TerraCoachRunner:
             state.approve(target)
         else:
             state.reject(target, rejection_message="The user rejected this action.")
-        result = await Runner.run(agent, state, run_config=self.run_config(), session=session)
+        result = await asyncio.wait_for(
+            Runner.run(agent, state, run_config=self.run_config(), session=session),
+            timeout=AGENT_RUN_TIMEOUT_SECONDS,
+        )
         outcome = await self._outcome(result=result, context=context)
         await self._repository.delete(chat_id=chat_id, run_id=stored.run_id)
         return outcome

@@ -61,6 +61,9 @@ Read tools are narrowly typed: `get_learning_profile`, `search_problem_pool`,
 and required difficulty mix, hydrates canonical fields, and produces the
 deterministic preview. Persisting that preview as an unsent proposal batch is
 pre-authorized operational staging, not a user-learning or outcome mutation.
+V2 has no Browserless or SearXNG dependency. `get_walkthroughs` remains a
+bounded empty result until a first-party tutorial source is adopted; canonical
+problem refresh calls LeetCode directly and rejects non-exact slug matches.
 
 Write tools are atomic domain operations and accept identifiers plus confirmed
 outcomes, never model-supplied problem metadata: `commit_picks`,

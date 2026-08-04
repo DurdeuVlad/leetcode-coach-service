@@ -55,7 +55,7 @@ class OpenAISolAdvisor:
         except ImportError as exc:  # pragma: no cover - dependency configuration
             raise RuntimeError("The OpenAI Python SDK is required for Sol escalation.") from exc
 
-        client = AsyncOpenAI(api_key=self._api_key)
+        client = AsyncOpenAI(api_key=self._api_key, timeout=90.0, max_retries=2)
         response = await client.responses.create(
             model=self._model,
             reasoning={"effort": "medium"},

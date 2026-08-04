@@ -265,10 +265,21 @@ class CoachDomain:
         return self._apply_lesson_delta(chat_id, lesson_delta)
 
     def record_update(self, update_id: int, chat_id: int) -> bool:
-        """Claim a new or previously failed update; handled/in-flight updates are duplicates."""
+        """Claim a new, failed, or abandoned update.
+
+        A recent ``received`` row is still being handled and must not run twice.
+        An old row is reclaimable after a worker crash so Telegram retries cannot
+        strand an update forever.
+        """
         existing = self.session.get(V2ProcessedUpdate, update_id)
-        if existing is not None and existing.status != "failed":
-            return False
+        reclaim_before = utcnow() - dt.timedelta(minutes=15)
+        if existing is not None:
+            reclaimable = existing.status == "failed" or (
+                existing.status == "received"
+                and as_utc(existing.received_at) <= reclaim_before
+            )
+            if not reclaimable:
+                return False
         if existing is not None:
             existing.status = "received"
             existing.error = None
@@ -279,6 +290,10 @@ class CoachDomain:
         self.session.add(V2ProcessedUpdate(update_id=update_id, chat_id=chat_id))
         self.session.flush()
         return True
+
+    def processed_update_status(self, update_id: int) -> str | None:
+        update = self.session.get(V2ProcessedUpdate, update_id)
+        return update.status if update is not None else None
 
     def mark_update_handled(self, update_id: int, error: str | None = None) -> None:
         update = self.session.get(V2ProcessedUpdate, update_id)

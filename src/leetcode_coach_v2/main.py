@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import secrets
 from contextlib import asynccontextmanager
 
 import structlog
@@ -50,7 +51,10 @@ async def telegram_webhook(
     ),
 ) -> Response:
     if settings.telegram_webhook_secret and (
-        x_telegram_bot_api_secret_token != settings.telegram_webhook_secret
+        x_telegram_bot_api_secret_token is None
+        or not secrets.compare_digest(
+            x_telegram_bot_api_secret_token, settings.telegram_webhook_secret
+        )
     ):
         return Response(status_code=200)
     try:
@@ -73,7 +77,8 @@ async def telegram_webhook(
     with Session(engine) as session:
         domain = CoachDomain(session)
         if not domain.record_update(update_id, chat_id):
-            return Response(status_code=200)
+            status = domain.processed_update_status(update_id)
+            return Response(status_code=503 if status == "received" else 200)
         try:
             session.commit()
         except IntegrityError:

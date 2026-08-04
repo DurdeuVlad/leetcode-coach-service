@@ -1,4 +1,4 @@
-"""V2 LeetCode refresh through Browserless with exact-slug metadata checks."""
+"""Direct V2 LeetCode refresh with exact-slug metadata checks."""
 
 from __future__ import annotations
 
@@ -11,19 +11,7 @@ from leetcode_coach_v2.config import get_settings
 
 _RECENT = """query recentAcSubmissions($username:String!,$limit:Int!){recentAcSubmissionList(username:$username,limit:$limit){title titleSlug}}"""
 _META = """query problemsetQuestionList($filters:QuestionListFilterInput){problemsetQuestionList:questionList(categorySlug:"",limit:10,skip:0,filters:$filters){questions:data{difficulty title titleSlug topicTags{name slug}}}}"""
-_CODE = """
-export default async ({ page, context }) => {
-  await page.goto('https://leetcode.com', { waitUntil: 'networkidle2', timeout: 30000 });
-  const result = await page.evaluate(async (query, variables) => {
-    const response = await fetch('https://leetcode.com/graphql/', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({query, variables})
-    });
-    return await response.json();
-  }, context.query, context.variables);
-  return {data: result, type: 'application/json'};
-};
-"""
+_GRAPHQL_URL = "https://leetcode.com/graphql/"
 
 
 class LeetCodeV2Error(RuntimeError):
@@ -49,23 +37,23 @@ class ProblemRecord:
     reraise=True,
 )
 async def _post(query: str, variables: dict) -> dict:
-    settings = get_settings()
-    if not settings.browserless_url:
-        raise LeetCodeV2Error("BROWSERLESS_URL is required for LeetCode refresh")
-    url = settings.browserless_url.rstrip("/") + "/function"
-    if settings.browserless_token:
-        url += f"?token={settings.browserless_token}"
     try:
         async with httpx.AsyncClient(timeout=60) as client:
             response = await client.post(
-                url, json={"code": _CODE, "context": {"query": query, "variables": variables}}
+                _GRAPHQL_URL,
+                headers={
+                    "Content-Type": "application/json",
+                    "Referer": "https://leetcode.com/",
+                    "User-Agent": "leetcode-coach-service/2.0",
+                },
+                json={"query": query, "variables": variables},
             )
     except httpx.HTTPError as exc:
-        raise _Transient("Browserless transport failure") from exc
+        raise _Transient("LeetCode transport failure") from exc
     if response.status_code == 429 or response.status_code >= 500:
-        raise _Transient(f"Browserless HTTP {response.status_code}")
+        raise _Transient(f"LeetCode HTTP {response.status_code}")
     if response.status_code >= 400:
-        raise LeetCodeV2Error(f"Browserless HTTP {response.status_code}: {response.text[:200]}")
+        raise LeetCodeV2Error(f"LeetCode HTTP {response.status_code}: {response.text[:200]}")
     payload = response.json()
     if payload.get("errors"):
         raise LeetCodeV2Error(f"LeetCode GraphQL errors: {payload['errors']}")

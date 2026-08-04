@@ -1,3 +1,6 @@
+import asyncio
+from collections import defaultdict
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy.pool import StaticPool
@@ -7,7 +10,15 @@ from leetcode_coach_v2.agent.orchestrator import AgentRunOutcome, AgentSettings
 from leetcode_coach_v2.agent.state import PendingApproval, SerializedRunState
 from leetcode_coach_v2.application import CoachApplication
 from leetcode_coach_v2.db.base import V2SQLModel
-from leetcode_coach_v2.db.models import Difficulty, V2AgentRun, V2Problem
+from leetcode_coach_v2.db.models import (
+    ApprovalStatus,
+    Difficulty,
+    V2AgentRun,
+    V2Attempt,
+    V2PendingApproval,
+    V2Problem,
+)
+from leetcode_coach_v2.domain.exceptions import Conflict
 from leetcode_coach_v2.runtime.adapters import (
     PostgresAgentSession,
     SQLCoachDomainAdapter,
@@ -91,6 +102,31 @@ async def test_run_state_alias_round_trip_and_expiry(v2_engine):
 
 
 @pytest.mark.asyncio
+async def test_new_paused_state_expires_superseded_approval_aliases(v2_engine):
+    repository = SQLRunStateRepository(v2_engine)
+    first = SerializedRunState.new(
+        chat_id=70,
+        sdk_state={"step": 1},
+        approvals=[PendingApproval("call-1", "commit_picks", "call-1", {}, "First")],
+    )
+    second = SerializedRunState.new(
+        chat_id=70,
+        sdk_state={"step": 2},
+        approvals=[PendingApproval("call-2", "commit_attempt", "call-2", {}, "Second")],
+    )
+    await repository.save(first)
+    await repository.save(second)
+
+    pending = await repository.pending_rows(70)
+    assert [row.summary for row in pending] == ["Second"]
+    with Session(v2_engine) as session:
+        old = session.exec(
+            select(V2PendingApproval).where(V2PendingApproval.agent_run_id == first.run_id)
+        ).one()
+        assert old.status == ApprovalStatus.EXPIRED
+
+
+@pytest.mark.asyncio
 async def test_paused_metrics_update_preserves_resumable_sdk_state(v2_engine):
     repository = SQLRunStateRepository(v2_engine)
     state = SerializedRunState.new(
@@ -161,6 +197,99 @@ async def test_problem_pool_honors_typed_filter_shape(v2_engine):
         limit=10,
     )
     assert [row["slug"] for row in rows] == ["graph-medium"]
+
+
+@pytest.mark.asyncio
+async def test_learning_profile_bounds_attempt_feedback(v2_engine):
+    with Session(v2_engine) as session:
+        session.add(_problem("medium-a", "medium"))
+        session.add(
+            V2Attempt(
+                chat_id=1,
+                problem_slug="medium-a",
+                outcome="solved",
+                feedback="x" * 4_000,
+            )
+        )
+        session.commit()
+
+    result = await SQLCoachDomainAdapter(v2_engine).get_learning_profile(chat_id=1)
+    assert len(result["recent_attempts"][0]["feedback"]) == 500
+    assert result["recent_attempts"][0]["feedback"].endswith("…")
+
+
+@pytest.mark.asyncio
+async def test_pending_approval_blocks_a_second_agent_run(v2_engine, monkeypatch):
+    from leetcode_coach_v2 import application as application_module
+
+    class FakeRepository:
+        async def pending_rows(self, chat_id):
+            return [
+                SimpleNamespace(
+                    id="alias",
+                    summary="Approve pending write?",
+                    approval_message_id=77,
+                )
+            ]
+
+    class FakeRunner:
+        async def run(self, **kwargs):
+            raise AssertionError("a second agent run must not start")
+
+    sent = []
+
+    async def fake_send(chat_id, text, **kwargs):
+        sent.append(text)
+        return 1
+
+    monkeypatch.setattr(application_module, "send_message", fake_send)
+    application = CoachApplication.__new__(CoachApplication)
+    application.engine = v2_engine
+    application.repository = FakeRepository()
+    application.runner = FakeRunner()
+    application._locks = defaultdict(asyncio.Lock)
+
+    await application.handle_text(
+        chat_id=1,
+        text="give me another proposal",
+        message_id=10,
+        reply_to_message_id=None,
+    )
+
+    assert sent == [
+        "Resolve the pending approval with Approve/Reject or exact yes/no first."
+    ]
+
+
+@pytest.mark.asyncio
+async def test_stale_review_callback_is_acknowledged_without_retry(v2_engine, monkeypatch):
+    from leetcode_coach_v2 import application as application_module
+
+    class FakeDomain:
+        async def skip_problem(self, **kwargs):
+            raise Conflict("stale")
+
+    acknowledgements = []
+    sent = []
+
+    async def fake_ack(callback_id, text=None):
+        acknowledgements.append((callback_id, text))
+
+    async def fake_send(chat_id, text, **kwargs):
+        sent.append(text)
+        return 1
+
+    monkeypatch.setattr(application_module, "answer_callback", fake_ack)
+    monkeypatch.setattr(application_module, "send_message", fake_send)
+    application = CoachApplication.__new__(CoachApplication)
+    application.engine = v2_engine
+    application.domain = FakeDomain()
+    application._locks = defaultdict(asyncio.Lock)
+
+    await application.handle_callback(chat_id=1, callback_id="old", data="v2r:skip:999")
+
+    assert acknowledgements == [("old", None)]
+    assert sent == ["That review action is no longer active."]
 
 
 @pytest.mark.asyncio
@@ -307,3 +436,11 @@ async def test_conversation_session_does_not_implicitly_split_long_tool_history(
 
     assert len(loaded) == 47
     assert loaded[-2]["call_id"] == loaded[-1]["call_id"] == "call-final"
+
+
+@pytest.mark.asyncio
+async def test_conversation_session_accepts_large_opaque_sdk_item(v2_engine):
+    store = PostgresAgentSession(v2_engine, 11)
+    await store.add_items([{"type": "function_call_output", "output": "x" * 20_000}])
+
+    assert len((await store.get_items())[0]["output"]) == 20_000

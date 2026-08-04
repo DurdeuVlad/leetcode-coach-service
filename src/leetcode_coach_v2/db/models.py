@@ -225,7 +225,7 @@ class V2ConversationItem(V2SQLModel, table=True):
     chat_id: int = Field(sa_column=sa.Column(sa.BigInteger, nullable=False, index=True))
     sequence: int = Field()
     role: str = Field(max_length=20)
-    content: str = Field(max_length=12000)
+    content: str = Field(sa_column=sa.Column(sa.Text, nullable=False))
     created_at: dt.datetime = Field(default_factory=utcnow)
 
 

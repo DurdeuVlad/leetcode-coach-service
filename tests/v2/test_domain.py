@@ -9,6 +9,7 @@ from leetcode_coach_v2.db.models import (
     ProposalStatus,
     V2Lesson,
     V2Problem,
+    V2ProcessedUpdate,
     V2SQLModel,
 )
 from leetcode_coach_v2.domain.exceptions import Conflict, DomainError
@@ -125,6 +126,20 @@ def test_failed_update_can_retry_but_handled_update_cannot(session):
     assert domain.record_update(200, 100) is True
     domain.mark_update_handled(200)
     assert domain.record_update(200, 100) is False
+
+
+def test_inflight_update_retries_with_lease_and_recovers_after_crash(session):
+    domain = CoachDomain(session)
+    assert domain.record_update(201, 100) is True
+    assert domain.processed_update_status(201) == "received"
+    assert domain.record_update(201, 100) is False
+
+    row = session.get(V2ProcessedUpdate, 201)
+    row.received_at = dt.datetime.now(dt.UTC) - dt.timedelta(minutes=16)
+    session.flush()
+
+    assert domain.record_update(201, 100) is True
+    assert row.received_at > dt.datetime.now(dt.UTC) - dt.timedelta(minutes=1)
 
 
 def test_lesson_delta_matches_agent_schema_and_keeps_double_gate(session):

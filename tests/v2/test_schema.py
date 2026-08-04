@@ -33,3 +33,7 @@ def test_telegram_identifiers_compile_as_postgres_bigint() -> None:
     assert isinstance(V2ProposalBatch.__table__.c.telegram_message_id.type, sa.BigInteger)
     assert isinstance(V2PendingReview.__table__.c.telegram_message_id.type, sa.BigInteger)
     assert isinstance(V2PendingApproval.__table__.c.approval_message_id.type, sa.BigInteger)
+
+
+def test_conversation_state_uses_unbounded_text_storage() -> None:
+    assert isinstance(V2ConversationItem.__table__.c.content.type, sa.Text)

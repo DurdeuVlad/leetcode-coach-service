@@ -1,8 +1,75 @@
 # Roadmap — LeetCode Coach Service
 
-Status: plan | Owner: Vlad | Last revised: 2026-07-30
-Companion to `business-requirements.md` (the contract) and `architecture.md`
-(the design). Phased so each phase ships something testable on its own.
+> **Status: V1 historical roadmap — superseded 2026-08-03.**
+>
+> The checked items below describe V1 only. They do not mark Agentic V2 work
+> complete. V2 delivery is the active plan immediately below; its sequence and
+> exit criteria override conflicting V1 phases.
+
+## Agentic V2 delivery plan (active)
+
+Checked items are implemented and locally verified. Deployment-only items stay
+unchecked until the operator completes them; “implemented” is not “shipped.”
+The detailed contract and acceptance suite are in [`agentic-v2.md`](./agentic-v2.md).
+
+### V2.0 — Establish the baseline
+
+- [ ] Verify the production deployment SHA. The branch already contains the
+      HTML rendering fix; visible MarkdownV2 escapes mean production is stale.
+- [ ] Record the V1 database and deployment as read-only rollback artifacts.
+- [ ] Provision a separate V2 production database. A separate staging bot is
+      explicitly outside the current scope.
+
+**Exit criteria:** deployed SHA is recorded; V1 is untouched; V2 has isolated
+production infrastructure.
+
+### V2.1 — New schema, domain layer, and learning-only import
+
+- [x] Create the fresh Alembic schema and domain services for canonical
+      problems, attempts, lessons, proposal batches, reviews, credit ledger,
+      bot state, Telegram idempotency, conversation items, agent runs, and
+      pending approvals.
+- [x] Implement deterministic HTML proposal and plain-text/code-safe renderers.
+- [x] Implement a migration command that imports only canonical problems,
+      attempt history, and tutor lessons; it must start credits at zero and
+      discard V1 operational state.
+
+**Exit criteria:** migration count/representative tests pass; canonical metadata
+is the only metadata persisted or rendered.
+
+### V2.2 — Agent runner, tools, approvals, and Telegram adapter
+
+- [x] Implement a serialized per-chat Agents SDK runner using Terra, bounded
+      to eight turns and three concurrent read tools.
+- [x] Add typed read tools, serial write tools, PostgreSQL run state, approval
+      persistence/resume/expiry, and duplicate-update protection.
+- [x] Add the read-only, once-per-run Terra-to-Sol advisor tool and telemetry.
+
+**Exit criteria:** approval, restart/resume, stale callback, idempotency, tool
+validation, and Sol-bound tests pass.
+
+### V2.3 — Scheduling and feature parity
+
+- [x] Rebuild proposal/refill, coaching, lessons, credits/tax, nudges, expiry,
+      extension, status, hints, explanations, reattempts, and follow-ups on
+      the V2 domain layer.
+- [x] Run the terminal/live real-model suite against SQLite and PostgreSQL.
+- [x] Validate the Telegram adapter locally against the official Bot API
+      contract, including webhook authentication, HTML/entity limits, callback
+      byte limits, edit/answer methods, retries, and duplicate updates.
+
+**Exit criteria:** all V2 acceptance scenarios pass without model-generated
+markup or fabricated state.
+
+### V2.4 — Cutover and rollback window
+
+- [ ] Import learning data into a fresh production V2 database, switch the
+      webhook, and enable the scheduler.
+- [ ] Keep V1 deployment/database read-only for seven days; remove only after
+      the stability window and observability review.
+
+**Exit criteria:** production cutover is verified and rollback remains viable
+for seven days.
 
 ## Guiding principles
 

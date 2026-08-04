@@ -1,0 +1,61 @@
+services:
+  postgres_v2:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: leetcode_v2
+      POSTGRES_PASSWORD: leetcode_v2
+      POSTGRES_DB: leetcode_coach_v2
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata_v2:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U leetcode_v2 -d leetcode_coach_v2"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  app_v2:
+    build: .
+    entrypoint: ["/app/entrypoint-v2.sh"]
+    command: ["uvicorn", "leetcode_coach_v2.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    depends_on:
+      postgres_v2:
+        condition: service_healthy
+    environment: &v2_environment
+      DATABASE_URL: postgresql+psycopg://leetcode_v2:leetcode_v2@postgres_v2:5432/leetcode_coach_v2
+      LEGACY_DATABASE_URL: ${LEGACY_DATABASE_URL:-}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-dummy}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-0}
+      TELEGRAM_WEBHOOK_URL: ${TELEGRAM_WEBHOOK_URL:-}
+      TELEGRAM_WEBHOOK_SECRET: ${TELEGRAM_WEBHOOK_SECRET:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-dummy}
+      TERRA_MODEL: ${TERRA_MODEL:-gpt-5.6-terra}
+      SOL_ADVISOR_MODEL: ${SOL_ADVISOR_MODEL:-gpt-5.6-sol}
+      AGENT_MAX_TURNS: ${AGENT_MAX_TURNS:-8}
+      APPROVAL_TTL_HOURS: ${APPROVAL_TTL_HOURS:-24}
+      PROMPT_CACHE_TTL: ${PROMPT_CACHE_TTL:-30m}
+      LEETCODE_USERNAME: ${LEETCODE_USERNAME:-}
+      TIMEZONE: ${TIMEZONE:-Europe/Bucharest}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    ports:
+      - "8001:8000"
+    restart: unless-stopped
+
+  scheduler_v2:
+    build: .
+    entrypoint: ["/app/entrypoint-v2.sh"]
+    command: ["python", "-m", "leetcode_coach_v2.scheduler"]
+    depends_on:
+      postgres_v2:
+        condition: service_healthy
+    environment: *v2_environment
+    healthcheck:
+      test: ["CMD-SHELL", "kill -0 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+volumes:
+  pgdata_v2:

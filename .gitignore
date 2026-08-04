@@ -44,5 +44,6 @@ Thumbs.db
 
 # Temporary scratch files (agent working files, not source)
 .tmp_*
+.local-*.db
 ANTIGRAVITY_DEPLOY_PROMPT.md
 ANTIGRAVITY_DIAGNOSE_PROMPT.md

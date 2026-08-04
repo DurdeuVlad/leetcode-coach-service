@@ -8,7 +8,6 @@ external services themselves.
 
 from __future__ import annotations
 
-import asyncio
 from types import SimpleNamespace
 
 import httpx

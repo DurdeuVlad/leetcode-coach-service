@@ -91,7 +91,7 @@ async def _probe_gemini() -> ProbeResult:
         from google.genai import types
 
         client = genai.Client(api_key=key)
-        resp = await asyncio.wait_for(
+        await asyncio.wait_for(
             client.aio.models.generate_content(
                 model=s.gemini_model,
                 contents="ping",
@@ -101,7 +101,7 @@ async def _probe_gemini() -> ProbeResult:
         )
         # Any non-exception response means the key + model are valid.
         return ProbeResult("gemini", "ok", s.gemini_model)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         return ProbeResult("gemini", "unreachable", "timeout")
     except Exception as e:
         return ProbeResult("gemini", "unreachable", str(e)[:120])

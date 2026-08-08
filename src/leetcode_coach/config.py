@@ -1,9 +1,4 @@
-"""Typed env-var configuration via pydantic-settings.
-
-Single responsibility (per #034): load + validate env into typed settings.
-No business logic, no network calls. Missing required vars fail fast at
-startup with a clear error.
-"""
+"""Typed runtime configuration for the agentic service."""
 
 from __future__ import annotations
 
@@ -13,9 +8,7 @@ from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-class Settings(BaseSettings):
-    """All env vars the service reads. Keys match `.env.example` exactly."""
-
+class V2Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
@@ -23,65 +16,34 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # Database
-    database_url: str = Field(
-        ..., description="Postgres DSN, e.g. postgresql+psycopg://user:pass@host:5432/db"
+    database_url: str = Field(..., description="Fresh V2 PostgreSQL DSN")
+    legacy_database_url: str = Field(
+        "", description="Read-only v1 DSN used only by the one-shot importer"
     )
 
-    # Telegram
-    telegram_bot_token: str = Field(..., description="Bot token from @BotFather")
-    telegram_chat_id: str = Field(..., description="Allowed chat id (single-user allowlist)")
-    telegram_webhook_url: str = Field(
-        "", description="Public HTTPS URL Telegram will POST updates to"
-    )
-    telegram_webhook_secret: str = Field(
-        "", description="Secret token echoed back in X-Telegram-Bot-Api-Secret-Token"
-    )
+    telegram_bot_token: str = Field(...)
+    telegram_chat_id: str = Field(...)
+    telegram_webhook_url: str = ""
+    telegram_webhook_secret: str = ""
 
-    # LLM
-    openai_api_key: str = Field(..., description="OpenAI API key (primary model)")
-    openai_model: str = Field(
-        "gpt-5.6-sol", description="OpenAI model name (primary, architecture.md §2)"
-    )
-    gemini_api_key: str = Field(..., description="Google Gemini API key (fallback model)")
-    gemini_model: str = Field(
-        "gemini-3.6-flash", description="Gemini model name (fallback, architecture.md §2)"
-    )
+    openai_api_key: str = Field(...)
+    terra_model: str = "gpt-5.6-terra"
+    sol_advisor_model: str = "gpt-5.6-sol"
+    agent_max_turns: int = Field(8, ge=1, le=8)
+    approval_ttl_hours: int = Field(24, ge=1, le=168)
+    prompt_cache_ttl: str = "30m"
 
-    # YouTube search via SearXNG (homelab) — primary YouTube search path
-    # (per docs/business-requirements.md §8 #3). If absent, YouTube
-    # enrichment is disabled (callers skip, not hard error).
-    searxng_url: str = Field(
-        "", description="Base URL of SearXNG instance, e.g. https://search.example.com"
-    )
+    timezone: str = "Europe/Bucharest"
+    leetcode_username: str = ""
+    log_level: str = "INFO"
 
-    # Browserless (homelab) — primary path for LeetCode GraphQL (per
-    # docs/business-requirements.md §8 #4). If absent, GraphQL calls raise
-    # LeetCodeFetchError immediately. For Browserless Cloud, set
-    # BROWSERLESS_TOKEN too — it's appended as `?token=...` to the URL.
-    browserless_url: str = Field(
-        "", description="Base URL of Browserless, e.g. https://browserless.example.com"
-    )
-    browserless_token: str = Field(
-        "", description="Browserless Cloud API token — leave blank for homelab (no auth)"
-    )
-
-    # LeetCode
-    leetcode_username: str = Field(...)
-
-    # Admin API — shared secret for the /admin/* test/trigger endpoints.
-    # Empty = admin endpoints disabled (returns 404). Set to a random string
-    # to enable automated end-to-end testing via HTTP.
-    admin_api_key: str = Field(
-        "", description="Shared secret for /admin/* endpoints — blank disables admin API"
-    )
-
-    # Runtime
-    timezone: str = Field("Europe/Bucharest")
-    log_level: str = Field("INFO")
+    # Browserless (homelab) — routes LeetCode GraphQL past Cloudflare.
+    # Browserless v2 requires the /chrome/ path prefix (e.g. /chrome/function).
+    # Blank disables LeetCode refresh; the bot still works with a manually-seeded pool.
+    browserless_url: str = ""
+    browserless_token: str = ""
 
 
 @lru_cache(maxsize=1)
-def get_settings() -> Settings:
-    """Cached settings singleton — constructed once on first access."""
-    return Settings()  # type: ignore[call-arg]
+def get_settings() -> V2Settings:
+    return V2Settings()  # type: ignore[call-arg]

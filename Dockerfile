@@ -21,10 +21,7 @@ RUN uv sync --frozen --no-dev --no-install-project || \
 COPY src/ ./src/
 COPY alembic/ ./alembic/
 COPY alembic.ini ./
-COPY alembic_v2/ ./alembic_v2/
-COPY alembic-v2.ini ./
 COPY entrypoint.sh ./
-COPY entrypoint-v2.sh ./
 
 RUN uv sync --frozen --no-dev || uv sync --no-dev
 
@@ -49,11 +46,8 @@ COPY --from=builder --chown=app:app /app/.venv /app/.venv
 COPY --from=builder --chown=app:app /app/src ./src
 COPY --from=builder --chown=app:app /app/alembic ./alembic
 COPY --from=builder --chown=app:app /app/alembic.ini ./alembic.ini
-COPY --from=builder --chown=app:app /app/alembic_v2 ./alembic_v2
-COPY --from=builder --chown=app:app /app/alembic-v2.ini ./alembic-v2.ini
 COPY --chown=app:app entrypoint.sh ./entrypoint.sh
-COPY --chown=app:app entrypoint-v2.sh ./entrypoint-v2.sh
-RUN chmod +x ./entrypoint.sh ./entrypoint-v2.sh
+RUN chmod +x ./entrypoint.sh
 
 # Put the venv on PATH so `uvicorn`, `alembic` resolve directly.
 ENV PATH="/app/.venv/bin:$PATH" \
@@ -69,7 +63,7 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD curl -fsS http://127.0.0.1:8000/health || exit 1
 
-# Entrypoint runs migrations only for the webhook app. The same image also
-# runs the scheduler-only command in Coolify.
+# The entrypoint runs alembic migrations, then starts the app with the
+# in-process scheduler (single container, no separate scheduler service).
 ENTRYPOINT ["/app/entrypoint.sh"]
 CMD ["uvicorn", "leetcode_coach.main:app", "--host", "0.0.0.0", "--port", "8000"]

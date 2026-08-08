@@ -1,38 +1,25 @@
-"""Alembic env — uses the app's SQLModel metadata + DATABASE_URL from settings.
-
-This wires migrations to the same engine the app uses, so `alembic upgrade
-head` (run by the container entrypoint) creates exactly the tables the app
-expects. Models are imported for their side effect on `SQLModel.metadata`;
-when #003 lands, the four tables appear here automatically.
-"""
-
 from __future__ import annotations
 
+import os
 from logging.config import fileConfig
 
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
-# Import settings + SQLModel metadata + models (side effect: registers tables).
-from leetcode_coach.config import get_settings
-from leetcode_coach.db import models  # noqa: F401  (registers tables on metadata)
-from leetcode_coach.db.base import SQLModel
+from leetcode_coach.db import models  # noqa: F401 - register V2 tables
+from leetcode_coach.db.base import BaseSQLModel
 
 config = context.config
-
-# Inject the runtime DATABASE_URL (overrides alembic.ini placeholder).
-config.set_main_option("sqlalchemy.url", get_settings().database_url)
-
-if config.config_file_name is not None:
+if os.getenv("DATABASE_URL"):
+    config.set_main_option("sqlalchemy.url", os.environ["DATABASE_URL"])
+if config.config_file_name:
     fileConfig(config.config_file_name)
-
-target_metadata = SQLModel.metadata
+target_metadata = BaseSQLModel.metadata
 
 
 def run_migrations_offline() -> None:
-    url = config.get_main_option("sqlalchemy.url")
     context.configure(
-        url=url,
+        url=config.get_main_option("sqlalchemy.url"),
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},

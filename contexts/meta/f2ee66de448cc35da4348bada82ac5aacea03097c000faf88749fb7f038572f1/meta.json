@@ -1,0 +1,1 @@
+{"Name":"podman-machine-default","Metadata":{"Description":"Podman machine podman-machine-default"},"Endpoints":{"docker":{"Host":"npipe:////./pipe/podman-machine-default"}}}

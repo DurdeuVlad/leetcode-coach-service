@@ -1,0 +1,20 @@
+# promptfoo config — Sol advisor prompt eval
+#
+# LOCAL ONLY. Never run in CI/CD — burns OpenAI credits.
+# Run:  npx promptfoo@latest eval -c promptfoo/promptfooconfig.sol.yaml
+# View: npx promptfoo@latest show
+#
+# Tests the Sol advisor (src/leetcode_coach/agent/advisor.py) for:
+# - all 4 JSON fields present (recommendation, risks, missing_evidence, suggested_next_action)
+# - risks and missing_evidence are arrays
+# - Sol never issues commands or claims actions occurred (read-only)
+
+description: "Sol advisor — 4 fields, read-only, no commands"
+
+prompts:
+  - file://prompts/sol_advisor.json
+
+providers:
+  - openai:chat:gpt-4o
+
+tests: file://tests/sol_tests.yaml

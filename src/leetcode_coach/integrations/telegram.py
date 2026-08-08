@@ -1,279 +1,167 @@
-"""Telegram Bot API client — webhook setup + send_message + send_reply.
-
-Mock-aware: if `TELEGRAM_BOT_TOKEN` is the placeholder `mock` or empty,
-all calls log instead of hitting the API. This lets the app run end-to-end
-in development without real credentials.
-
-Per NFR-1 layer 1, transient failures (429, 5xx, timeouts) retry via
-tenacity; auth/4xx do not retry and bubble up as `TelegramError`.
-
-Uses `httpx` directly (not the `python-telegram-bot` SDK) for the outbound
-calls in this module, for symmetry with the other integration clients and
-so `respx` can mock the transport in tests (#014). `python-telegram-bot`
-remains the dependency used for typed `Update` parsing on the inbound
-webhook side (#019).
-"""
+"""Minimal Telegram Bot API adapter with retries and a strict chat allowlist."""
 
 from __future__ import annotations
 
-import time
+import re
+from html.parser import HTMLParser
+from typing import Any
 
 import httpx
-import structlog
-from tenacity import (
-    retry,
-    retry_if_exception_type,
-    stop_after_attempt,
-    wait_exponential,
-)
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from leetcode_coach.config import get_settings
-from leetcode_coach.errors import TelegramError
-
-log = structlog.get_logger("telegram")
-
-_BASE = "https://api.telegram.org/bot{token}/{method}"
 
 
-class _TransientTelegramError(TelegramError):
-    """429/5xx/timeout — retried by tenacity. Never escapes `_call`."""
+class TelegramV2Error(RuntimeError):
+    pass
+
+
+class _TransientTelegramError(TelegramV2Error):
+    pass
+
+
+_WEBHOOK_SECRET = re.compile(r"^[A-Za-z0-9_-]{1,256}$")
+
+
+class _VisibleHTML(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.length = 0
+
+    def handle_data(self, data: str) -> None:
+        self.length += len(data)
+
+
+def _message_text(text: str, parse_mode: str | None) -> str:
+    if not text:
+        raise TelegramV2Error("Telegram message text must not be empty")
+    if parse_mode is None:
+        return text[:4096]
+    if parse_mode.upper() != "HTML":
+        raise TelegramV2Error("Only Telegram HTML parse mode is supported")
+    parser = _VisibleHTML()
+    try:
+        parser.feed(text)
+        parser.close()
+    except Exception as exc:
+        raise TelegramV2Error("Invalid Telegram HTML") from exc
+    if parser.length > 4096:
+        raise TelegramV2Error("Telegram HTML exceeds 4096 visible characters after entity parsing")
+    return text
+
+
+def _validate_markup(reply_markup: dict[str, Any] | None) -> None:
+    if reply_markup is None:
+        return
+    for row in reply_markup.get("inline_keyboard", []):
+        for button in row:
+            callback_data = button.get("callback_data")
+            if callback_data is not None and not 1 <= len(str(callback_data).encode("utf-8")) <= 64:
+                raise TelegramV2Error("Telegram callback_data must be 1-64 UTF-8 bytes")
+
+
+def _assert_chat(chat_id: str | int) -> str:
+    value = str(chat_id)
+    allowed = str(get_settings().telegram_chat_id)
+    if value != allowed:
+        raise TelegramV2Error(f"chat_id {value} is not allowlisted")
+    return value
 
 
 def _is_mock() -> bool:
-    token = get_settings().telegram_bot_token
-    return not token or token == "mock"
+    return get_settings().telegram_bot_token in {"", "mock", "dummy"}
 
 
-def _enforce_allowlist(chat_id: str) -> None:
-    """NFR-4: only the configured TELEGRAM_CHAT_ID is a valid target.
-
-    Reject any other chat_id before it reaches the API. This is the
-    single-user allowlist — the bot must never broadcast to arbitrary chats.
-    """
-    allowed = str(get_settings().telegram_chat_id)
-    if str(chat_id) != allowed:
-        raise TelegramError(f"chat_id {chat_id} not in allowlist (expected {allowed})")
-
-
-async def set_webhook(webhook_url: str) -> None:
-    """Tell Telegram to POST updates to `webhook_url`.
-
-    Called once on app startup (#030). Passes `secret_token` (verified on
-    inbound in #019 via the `X-Telegram-Bot-Api-Secret-Token` header) and
-    is explicit about `allowed_updates` (message, callback_query only).
-    Pass `webhook_url=""` to clear the webhook. No-op in mock mode.
-    """
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(min=1, max=8),
+    retry=retry_if_exception_type(_TransientTelegramError),
+    reraise=True,
+)
+async def _call(method: str, payload: dict[str, Any]) -> Any:
     if _is_mock():
-        log.info("set_webhook_mock", webhook_url=webhook_url)
-        return
+        return {"message_id": -1} if method == "sendMessage" else True
+    url = f"https://api.telegram.org/bot{get_settings().telegram_bot_token}/{method}"
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.post(url, json=payload)
+    except httpx.HTTPError as exc:
+        raise _TransientTelegramError(f"Telegram {method} transport failure") from exc
+    if response.status_code == 429 or response.status_code >= 500:
+        raise _TransientTelegramError(f"Telegram {method} HTTP {response.status_code}")
+    if response.status_code >= 400:
+        raise TelegramV2Error(f"Telegram {method} HTTP {response.status_code}: {response.text}")
+    body = response.json()
+    if not body.get("ok"):
+        raise TelegramV2Error(f"Telegram {method} rejected request: {body}")
+    return body.get("result")
+
+
+async def set_webhook(url: str) -> None:
+    if not url.startswith("https://"):
+        raise TelegramV2Error("Telegram cloud webhooks require an HTTPS URL")
+    payload: dict[str, Any] = {
+        "url": url,
+        "allowed_updates": ["message", "callback_query"],
+    }
     secret = get_settings().telegram_webhook_secret
-    payload: dict = {"url": webhook_url, "allowed_updates": ["message", "callback_query"]}
     if secret:
+        if not _WEBHOOK_SECRET.fullmatch(secret):
+            raise TelegramV2Error("Invalid Telegram webhook secret_token")
         payload["secret_token"] = secret
     await _call("setWebhook", payload)
 
 
 async def send_message(
-    chat_id: str,
+    chat_id: str | int,
     text: str,
     *,
-    reply_markup: dict | None = None,
+    reply_to_message_id: int | None = None,
+    reply_markup: dict[str, Any] | None = None,
     parse_mode: str | None = None,
 ) -> int:
-    """Send a message, return the resulting message_id.
-
-    Used by Flow A (the 5-candidate list), the expiry sweep (summary), and
-    `errors.send_alert` (alerts). `reply_markup` accepts an
-    `InlineKeyboardMarkup`-shaped dict for the 5-button pick UI in Flow B.
-    `parse_mode` sets Telegram's formatting mode — ``"MarkdownV2"`` for the
-    propose list, ``"HTML"`` for coach feedback / per-problem messages,
-    ``None`` (default) for plain text. Returns -1 in mock mode.
-
-    NFR-4: only the configured `TELEGRAM_CHAT_ID` is a valid target. Any
-    other chat_id is rejected before hitting the API.
-    """
-    _enforce_allowlist(chat_id)
-    if _is_mock():
-        log.info("send_message_mock", chat_id=chat_id, text=text[:200])
-        return -1
-    payload: dict = {"chat_id": chat_id, "text": text}
-    if reply_markup is not None:
-        payload["reply_markup"] = reply_markup
-    if parse_mode is not None:
-        payload["parse_mode"] = parse_mode
-    data = await _call("sendMessage", payload)
-    return int(data["result"]["message_id"])
-
-
-async def send_reply(
-    chat_id: str,
-    reply_to_message_id: int,
-    text: str,
-    *,
-    reply_markup: dict | None = None,
-    parse_mode: str | None = None,
-) -> int:
-    """Send a message replying to a specific prior message.
-
-    Used by Flow B's per-problem coach feedback. `reply_to_message_id` is
-    the inbound `Message.message_id` being replied to (not `update_id`).
-    `parse_mode` sets Telegram's formatting mode — ``"HTML"`` for coach
-    feedback, ``None`` (default) for plain text. Returns -1 in mock mode.
-
-    NFR-4: only the configured `TELEGRAM_CHAT_ID` is a valid target.
-    """
-    _enforce_allowlist(chat_id)
-    if _is_mock():
-        log.info(
-            "send_reply_mock",
-            chat_id=chat_id,
-            reply_to=reply_to_message_id,
-            text=text[:200],
-        )
-        return -1
-    payload: dict = {
-        "chat_id": chat_id,
-        "reply_to_message_id": reply_to_message_id,
-        "text": text,
+    _validate_markup(reply_markup)
+    payload: dict[str, Any] = {
+        "chat_id": _assert_chat(chat_id),
+        "text": _message_text(text, parse_mode),
     }
+    if reply_to_message_id is not None:
+        payload["reply_parameters"] = {"message_id": reply_to_message_id}
     if reply_markup is not None:
         payload["reply_markup"] = reply_markup
     if parse_mode is not None:
         payload["parse_mode"] = parse_mode
-    data = await _call("sendMessage", payload)
-    return int(data["result"]["message_id"])
+    result = await _call("sendMessage", payload)
+    return int(result["message_id"])
 
 
-async def edit_message_text(
-    chat_id: str, message_id: int, text: str, *, parse_mode: str | None = None
-) -> dict:
-    """Edit the text of an existing message. Returns the raw API result.
-
-    Used by the pinned progression message refresh (#039, FR-8.4). On
-    failure (message deleted, permissions changed), the caller catches
-    `TelegramError` and creates a new pinned message.
-
-    `parse_mode` sets Telegram's formatting mode — ``None`` (default) for
-    plain text, ``"HTML"`` for the pinned progression snapshot
-    (docs/telegram-formatting.md §3.2.4).
-
-    The "message is not modified" case (Telegram 400 with that exact
-    description) is NOT raised here — it surfaces as a `TelegramError` and
-    the caller (``refresh_pinned_message``) checks the error string to
-    distinguish it from a real failure.
-
-    Returns ``{"ok": True}`` in mock mode (no actual edit).
-    """
-    _enforce_allowlist(chat_id)
-    if _is_mock():
-        log.info("edit_message_text_mock", chat_id=chat_id, message_id=message_id, text=text[:200])
-        return {"ok": True}
-    payload: dict = {"chat_id": chat_id, "message_id": message_id, "text": text}
-    if parse_mode is not None:
-        payload["parse_mode"] = parse_mode
-    return await _call("editMessageText", payload)
-
-
-async def edit_message_reply_markup(
-    chat_id: str, message_id: int, reply_markup: dict | None
-) -> dict:
-    """Replace an inline keyboard, or remove it when ``reply_markup`` is ``None``.
-
-    This is deliberately separate from :func:`edit_message_text`: state
-    transitions often need to make an old Telegram button inert without
-    changing the user-visible card.
-    """
-    _enforce_allowlist(chat_id)
-    if _is_mock():
-        log.info("edit_message_reply_markup_mock", chat_id=chat_id, message_id=message_id)
-        return {"ok": True}
-    return await _call(
-        "editMessageReplyMarkup",
-        {"chat_id": chat_id, "message_id": message_id, "reply_markup": reply_markup},
-    )
-
-
-async def answer_callback_query(
-    callback_query_id: str,
+async def edit_message(
+    chat_id: str | int,
+    message_id: int,
     *,
     text: str | None = None,
-    show_alert: bool = False,
-) -> bool:
-    """Acknowledge a pressed inline button so Telegram clears its spinner."""
-    if _is_mock():
-        log.info("answer_callback_query_mock", callback_query_id=callback_query_id, text=text)
-        return True
-    payload: dict = {"callback_query_id": callback_query_id, "show_alert": show_alert}
+    reply_markup: dict[str, Any] | None = None,
+    parse_mode: str | None = None,
+) -> None:
+    _validate_markup(reply_markup)
+    payload: dict[str, Any] = {
+        "chat_id": _assert_chat(chat_id),
+        "message_id": message_id,
+    }
+    if text is not None:
+        payload["text"] = _message_text(text, parse_mode)
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
+        if reply_markup is not None:
+            payload["reply_markup"] = reply_markup
+        await _call("editMessageText", payload)
+    else:
+        payload["reply_markup"] = reply_markup
+        await _call("editMessageReplyMarkup", payload)
+
+
+async def answer_callback(callback_id: str, text: str | None = None) -> None:
+    payload: dict[str, Any] = {"callback_query_id": callback_id}
     if text:
         payload["text"] = text[:200]
-    data = await _call("answerCallbackQuery", payload)
-    return bool(data.get("result", True))
-
-
-async def pin_message(chat_id: str, message_id: int) -> None:
-    """Pin a message in the chat. No-op in mock mode.
-
-    Used by the pinned progression message (#039). Best-effort: a failure
-    to pin is logged but does not raise (the message still exists; it's
-    just not pinned — the next refresh will try again).
-    """
-    _enforce_allowlist(chat_id)
-    if _is_mock():
-        log.info("pin_message_mock", chat_id=chat_id, message_id=message_id)
-        return
-    await _call("pinChatMessage", {"chat_id": chat_id, "message_id": message_id})
-
-
-async def unpin_message(chat_id: str, message_id: int) -> None:
-    """Unpin a message. No-op in mock mode. Best-effort (see pin_message)."""
-    _enforce_allowlist(chat_id)
-    if _is_mock():
-        log.info("unpin_message_mock", chat_id=chat_id, message_id=message_id)
-        return
-    await _call("unpinChatMessage", {"chat_id": chat_id, "message_id": message_id})
-
-
-@retry(
-    stop=stop_after_attempt(3),
-    wait=wait_exponential(min=2, max=10),
-    retry=retry_if_exception_type(_TransientTelegramError),
-    reraise=True,
-)
-async def _call(method: str, payload: dict) -> dict:
-    """Call a Telegram Bot API method with retry on transient failures only.
-
-    Retries on HTTP 429/5xx and `httpx` timeout/network errors. Does NOT
-    retry on 400/401/403 — those are config errors or non-transient
-    (bad token, chat not found, bot blocked) and bubble up as `TelegramError`
-    for the caller to alert on.
-    """
-    token = get_settings().telegram_bot_token
-    url = _BASE.format(token=token, method=method)
-    start = time.monotonic()
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(url, json=payload)
-    except httpx.TimeoutException as e:
-        raise _TransientTelegramError(f"telegram {method} timeout") from e
-    except httpx.HTTPError as e:
-        raise _TransientTelegramError(f"telegram {method} http error: {e}") from e
-
-    duration_ms = int((time.monotonic() - start) * 1000)
-    if resp.status_code == 429 or resp.status_code >= 500:
-        raise _TransientTelegramError(f"telegram {method} HTTP {resp.status_code}")
-    if resp.status_code >= 400:
-        # Non-retryable client error (bad token, chat not found, bot blocked).
-        raise TelegramError(f"telegram {method} HTTP {resp.status_code}: {resp.text}")
-    data = resp.json()
-    if not data.get("ok"):
-        raise TelegramError(f"telegram {method} not ok: {data}")
-    result = data.get("result")
-    message_id = result.get("message_id") if isinstance(result, dict) else None
-    log.info(
-        "telegram_call",
-        method=method,
-        chars_sent=len(payload.get("text", "")),
-        message_id=message_id,
-        duration_ms=duration_ms,
-    )
-    return data
+    await _call("answerCallbackQuery", payload)

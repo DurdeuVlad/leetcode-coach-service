@@ -1,22 +1,22 @@
-# Agentic V2 live proof
+# Live proof
 
 Date: 2026-08-03
 
 The repeatable live acceptance harness is
-`uv run coach-v2-prove`. It uses the configured real OpenAI API key and real
+`uv run coach-prove`. It uses the configured real OpenAI API key and real
 `gpt-5.6-terra` / `gpt-5.6-sol` models. Only Telegram HTTP transport is replaced
 with an in-process transcript. The suite has passed against both the disposable
 SQLite database and PostgreSQL 16.14 in an isolated local Podman container.
 
 ```powershell
-$env:DATABASE_URL = 'sqlite:///./leetcode-coach-service/.local-v2-live-proof.db'
-$env:V2_PROOF_DATABASE_URL = $env:DATABASE_URL
-uv run alembic -c alembic-v2.ini upgrade head
-uv run coach-v2-prove
+$env:DATABASE_URL = 'sqlite:///./leetcode-coach-service/.local-live-proof.db'
+$env:PROOF_DATABASE_URL = $env:DATABASE_URL
+uv run alembic upgrade head
+uv run coach-prove
 ```
 
 For the PostgreSQL proof, start an isolated `postgres:16-alpine` container on
-`127.0.0.1:55432`, migrate it, set `V2_PROOF_ALLOW_POSTGRES=1`, and use the
+`127.0.0.1:55432`, migrate it, set `PROOF_ALLOW_POSTGRES=1`, and use the
 guarded proof DSN documented by `prove_live_flows.py`.
 
 The clean run completed with `LIVE_PROOF_OK` and covered:
@@ -75,10 +75,10 @@ An optional guarded outbound verifier remains available if separate test-bot
 credentials are supplied later:
 
 ```powershell
-$env:V2_STAGING_TELEGRAM_BOT_TOKEN = '<separate staging token>'
-$env:V2_STAGING_TELEGRAM_CHAT_ID = '<staging chat id>'
-$env:V2_STAGING_TELEGRAM_ALLOW_SEND = 'YES'
-uv run coach-v2-prove-telegram
+$env:STAGING_TELEGRAM_BOT_TOKEN = '<separate staging token>'
+$env:STAGING_TELEGRAM_CHAT_ID = '<staging chat id>'
+$env:STAGING_TELEGRAM_ALLOW_SEND = 'YES'
+uv run coach-prove-telegram
 ```
 
 It refuses the configured existing bot token and performs no send without the

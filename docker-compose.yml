@@ -1,5 +1,5 @@
 # Local development: app + postgres.
-# Architecture §10: `docker compose up -d postgres`, then alembic, then uvicorn.
+# The app runs the scheduler in-process (single container).
 # For local dev you usually run uvicorn on the host with --reload; the `app`
 # service here is for a full container-based smoke test (and mirrors Coolify).
 
@@ -26,48 +26,24 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      # Point at the compose-postgres service. Override via .env for real keys.
       DATABASE_URL: postgresql+psycopg://leetcode:leetcode@postgres:5432/leetcode_coach
-      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-dummy}
-      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-0}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:?Set TELEGRAM_BOT_TOKEN in .env}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:?Set TELEGRAM_CHAT_ID in .env}
       TELEGRAM_WEBHOOK_URL: ${TELEGRAM_WEBHOOK_URL:-}
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-dummy}
-      GEMINI_API_KEY: ${GEMINI_API_KEY:-dummy}
-      SEARXNG_URL: ${SEARXNG_URL:-}
+      TELEGRAM_WEBHOOK_SECRET: ${TELEGRAM_WEBHOOK_SECRET:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:?Set OPENAI_API_KEY in .env}
+      TERRA_MODEL: ${TERRA_MODEL:-gpt-5.6-terra}
+      SOL_ADVISOR_MODEL: ${SOL_ADVISOR_MODEL:-gpt-5.6-sol}
+      AGENT_MAX_TURNS: ${AGENT_MAX_TURNS:-8}
+      APPROVAL_TTL_HOURS: ${APPROVAL_TTL_HOURS:-24}
+      PROMPT_CACHE_TTL: ${PROMPT_CACHE_TTL:-30m}
+      LEETCODE_USERNAME: ${LEETCODE_USERNAME:-}
       BROWSERLESS_URL: ${BROWSERLESS_URL:-}
-      LEETCODE_USERNAME: ${LEETCODE_USERNAME:-dummy}
-      ADMIN_API_KEY: ${ADMIN_API_KEY:-}
+      BROWSERLESS_TOKEN: ${BROWSERLESS_TOKEN:-}
       TIMEZONE: ${TIMEZONE:-Europe/Bucharest}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     ports:
       - "8000:8000"
-    restart: unless-stopped
-
-  scheduler:
-    build: .
-    command: ["python", "-m", "leetcode_coach.scheduler"]
-    depends_on:
-      postgres:
-        condition: service_healthy
-    environment:
-      DATABASE_URL: postgresql+psycopg://leetcode:leetcode@postgres:5432/leetcode_coach
-      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-dummy}
-      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-0}
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-dummy}
-      GEMINI_API_KEY: ${GEMINI_API_KEY:-dummy}
-      SEARXNG_URL: ${SEARXNG_URL:-}
-      BROWSERLESS_URL: ${BROWSERLESS_URL:-}
-      LEETCODE_USERNAME: ${LEETCODE_USERNAME:-dummy}
-      TIMEZONE: ${TIMEZONE:-Europe/Bucharest}
-      LOG_LEVEL: ${LOG_LEVEL:-INFO}
-    # The image-level HTTP probe belongs to the app. Scheduler has no HTTP
-    # listener; PID 1 is the scheduler command and exits on an unrecoverable
-    # database/lock failure.
-    healthcheck:
-      test: ["CMD-SHELL", "kill -0 1"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
     restart: unless-stopped
 
 volumes:

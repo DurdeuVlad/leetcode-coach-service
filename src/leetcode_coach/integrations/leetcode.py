@@ -1,150 +1,33 @@
-"""LeetCode GraphQL client — fetch + typed parsing for the weekly pool refresh.
+"""V2 LeetCode refresh — routes GraphQL through Browserless /chrome/function.
 
-Per issue #012: this module *fetches and parses* the user's recent accepted
-submissions + enriches them with problem metadata (difficulty, tags) via
-LeetCode's undocumented GraphQL endpoint. `refresh_pool()` (Phase 5, #029)
-consumes `fetch_problems()` and upserts into `leetcode_problems`.
+Browserless v2 requires the /chrome/ path prefix for all Chrome REST
+endpoints. The Puppeteer function loads leetcode.com (past Cloudflare with
+a real Chrome), then runs the GraphQL fetch from within the page context.
 
-**Browserless is the primary and only path** (per the 2026-07-28 decision —
-see `docs/business-requirements.md` §8 #4 and `docs/architecture.md` §12).
-Cloudflare's 2026 bot detection blocks unauthenticated programmatic GraphQL
-from datacenter/homelab IPs as a matter of course; running the same
-`fetch()` from within a real Chrome page context (Browserless `/function`)
-is the robust default. The direct httpx code path is removed. If
-`BROWSERLESS_URL` is not configured, raise `LeetCodeFetchError` — never
-attempt a direct call.
-
-Mock-aware: if `LEETCODE_USERNAME` is the placeholder `mock` or empty,
-returns a small canned problem set so the pool is non-empty for Flow A
-testing.
+V2 enforces exact-slug canonical metadata: if LeetCode's search doesn't
+return an exact titleSlug match, the problem is rejected (not silently
+filled with wrong metadata).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from urllib.parse import urlparse, urlunparse
 
 import httpx
 import structlog
-from tenacity import (
-    retry,
-    retry_if_exception_type,
-    stop_after_attempt,
-    wait_exponential,
-)
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from leetcode_coach.config import get_settings
-from leetcode_coach.db.base import get_session
-from leetcode_coach.db.models import LeetCodeProblem
-from leetcode_coach.errors import LeetCodeFetchError
 
-log = structlog.get_logger("leetcode")
+log = structlog.get_logger("v2.leetcode")
 
-_RECENT_AC_QUERY = """
-query recentAcSubmissions($username: String!, $limit: Int!) {
-  recentAcSubmissionList(username: $username, limit: $limit) {
-    id
-    title
-    titleSlug
-    timestamp
-  }
-}
-"""
+_RECENT = """query recentAcSubmissions($username:String!,$limit:Int!){recentAcSubmissionList(username:$username,limit:$limit){title titleSlug}}"""
+_META = """query problemsetQuestionList($filters:QuestionListFilterInput){problemsetQuestionList:questionList(categorySlug:"",limit:10,skip:0,filters:$filters){questions:data{difficulty title titleSlug topicTags{name slug}}}}"""
 
-_METADATA_QUERY = """
-query problemsetQuestionList($categorySlug: String, $limit: Int, $skip: Int, $filters: QuestionListFilterInput) {
-  problemsetQuestionList: questionList(
-    categorySlug: $categorySlug
-    limit: $limit
-    skip: $skip
-    filters: $filters
-  ) {
-    total: totalNum
-    questions: data {
-      difficulty
-      title
-      titleSlug
-      topicTags { name slug }
-    }
-  }
-}
-"""
-
-
-@dataclass
-class ProblemRecord:
-    """A typed LeetCode problem, ready for upsert into `leetcode_problems`."""
-
-    slug: str
-    title: str
-    url: str
-    difficulty: str
-    tags: list[str]
-
-
-class _TransientLeetCodeError(Exception):
-    """429/5xx/timeout — retried by tenacity, never escapes `_post`."""
-
-
-def _is_mock(username: str) -> bool:
-    return not username or username == "mock"
-
-
-async def fetch_problems(username: str, *, limit: int = 20) -> list[ProblemRecord]:
-    """Fetch the user's recent accepted submissions, enriched with metadata.
-
-    Returns typed `ProblemRecord`s (title, slug, url, difficulty, tags). The
-    LeetCode `recentAcSubmissionList` query caps `limit` at 20 server-side —
-    a known limitation for users who solve >20 problems/week (see #012).
-
-    All GraphQL calls go through the homelab Browserless instance
-    (`docs/business-requirements.md` §8 #4). If Browserless is not
-    configured or fails, raises `LeetCodeFetchError`.
-    """
-    if _is_mock(username):
-        return _mock_pool()
-
-    recent = await _post(_RECENT_AC_QUERY, {"username": username, "limit": min(limit, 20)})
-    submissions = recent.get("data", {}).get("recentAcSubmissionList") or []
-
-    records: list[ProblemRecord] = []
-    for sub in submissions:
-        slug = sub["titleSlug"]
-        meta = await _fetch_metadata(slug)
-        records.append(
-            ProblemRecord(
-                slug=slug,
-                title=sub["title"],
-                url=f"https://leetcode.com/problems/{slug}/",
-                difficulty=(meta.get("difficulty") or "medium").lower(),
-                tags=[t["name"] for t in meta.get("topicTags", [])],
-            )
-        )
-    return records
-
-
-async def _fetch_metadata(slug: str) -> dict:
-    """Look up difficulty/tags for one problem via a targeted search."""
-    resp = await _post(
-        _METADATA_QUERY,
-        {
-            "categorySlug": "",
-            "limit": 1,
-            "skip": 0,
-            "filters": {"searchKeywords": slug},
-        },
-    )
-    questions = resp.get("data", {}).get("problemsetQuestionList", {}).get("questions", [])
-    for q in questions:
-        if q.get("titleSlug") == slug:
-            return q
-    return questions[0] if questions else {}
-
-
-# --- Browserless primary path --------------------------------------------
-
-# Puppeteer code executed by Browserless's /function endpoint. It loads
-# leetcode.com (getting past Cloudflare with a real Chrome), then runs the
-# GraphQL fetch from within the page context. Returns JSON.
+# Puppeteer code executed by Browserless's /chrome/function endpoint. It
+# loads leetcode.com (getting past Cloudflare with a real Chrome), then
+# runs the GraphQL fetch from within the page context. Returns JSON.
 _BROWSERLESS_CODE = """
 export default async ({ page, context }) => {
   await page.goto('https://leetcode.com', { waitUntil: 'networkidle2', timeout: 30000 });
@@ -162,154 +45,107 @@ export default async ({ page, context }) => {
 """
 
 
+class LeetCodeV2Error(RuntimeError):
+    pass
+
+
+class _Transient(LeetCodeV2Error):
+    pass
+
+
+@dataclass(frozen=True)
+class ProblemRecord:
+    slug: str
+    title: str
+    difficulty: str
+    tags: str
+
+
+def _build_function_url(base: str, token: str) -> str:
+    """Build the Browserless v2 /chrome/function URL with token query param.
+
+    Handles BROWSERLESS_URL whether it's given as:
+    - bare domain: https://browserless.example.com
+    - with /chrome subpath: https://browserless.example.com/chrome
+    - with existing path: https://browserless.example.com/chrome/function
+    """
+    parsed = urlparse(base.rstrip("/"))
+    # Always normalize to /chrome/function — strip any existing path.
+    path = "/chrome/function"
+    url = urlunparse((parsed.scheme, parsed.netloc, path, "", "", ""))
+    if token:
+        sep = "&" if "?" in url else "?"
+        url = f"{url}{sep}token={token}"
+    return url
+
+
 @retry(
     stop=stop_after_attempt(3),
     wait=wait_exponential(min=2, max=10),
-    retry=retry_if_exception_type(_TransientLeetCodeError),
+    retry=retry_if_exception_type(_Transient),
     reraise=True,
 )
 async def _post(query: str, variables: dict) -> dict:
-    """POST one GraphQL query through the homelab Browserless `/function`
-    endpoint.
-
-    Browserless is the primary and only path (per the 2026-07-28 decision —
-    `docs/business-requirements.md` §8 #4, `docs/architecture.md` §12).
-    The browser loads leetcode.com, then executes the GraphQL `fetch()`
-    from within the page context — Cloudflare sees a real Chrome request.
-
-    Retries only on transient Browserless HTTP (429/5xx/timeout). If
-    `BROWSERLESS_URL` is not configured, raises `LeetCodeFetchError`
-    immediately — never attempts a direct httpx call.
-    """
+    """POST one GraphQL query through the homelab Browserless /chrome/function."""
     settings = get_settings()
-    browserless_url = settings.browserless_url
-    if not browserless_url or browserless_url == "mock":
-        log.error("browserless_not_configured", hint="Set BROWSERLESS_URL in .env")
-        raise LeetCodeFetchError(
+    if not settings.browserless_url or settings.browserless_url == "mock":
+        raise LeetCodeV2Error(
             "BROWSERLESS_URL not configured — LeetCode GraphQL requires the "
-            "homelab Browserless instance (per architecture.md §12)"
+            "homelab Browserless instance (v2 /chrome/function endpoint)"
         )
 
-    base = browserless_url.rstrip("/")
-    token = settings.browserless_token
-    function_url = f"{base}/function"
-    if token:
-        # Browserless Cloud expects the token as a query param.
-        sep = "&" if "?" in function_url else "?"
-        function_url = f"{function_url}{sep}token={token}"
+    function_url = _build_function_url(settings.browserless_url, settings.browserless_token)
     try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            resp = await client.post(
+        async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
+            response = await client.post(
                 function_url,
                 json={
                     "code": _BROWSERLESS_CODE,
                     "context": {"query": query, "variables": variables},
                 },
             )
-    except httpx.TimeoutException as e:
-        raise _TransientLeetCodeError(f"browserless timeout: {e}") from e
-    except httpx.HTTPError as e:
-        raise _TransientLeetCodeError(f"browserless http error: {e}") from e
+    except httpx.TimeoutException as exc:
+        raise _Transient(f"browserless timeout: {exc}") from exc
+    except httpx.HTTPError as exc:
+        raise _Transient(f"browserless http error: {exc}") from exc
 
-    if resp.status_code == 429 or resp.status_code >= 500:
-        raise _TransientLeetCodeError(f"browserless /function HTTP {resp.status_code}")
-    if resp.status_code >= 400:
-        raise LeetCodeFetchError(
-            f"browserless /function returned HTTP {resp.status_code}: {resp.text[:200]}"
+    if response.status_code == 429 or response.status_code >= 500:
+        raise _Transient(f"browserless /chrome/function HTTP {response.status_code}")
+    if response.status_code >= 400:
+        raise LeetCodeV2Error(
+            f"browserless /chrome/function returned HTTP {response.status_code}: {response.text[:200]}"
         )
 
-    data = resp.json()
+    data = response.json()
     if isinstance(data, dict) and "__error" in data:
-        raise LeetCodeFetchError(f"browserless graphql fetch failed: {data['__error']}")
-    if data.get("errors"):
-        # e.g. user-not-found — not transient, do not retry.
-        log.warning("leetcode_graphql_errors", errors=data["errors"])
+        raise LeetCodeV2Error(f"browserless graphql fetch failed: {data['__error']}")
+    # Browserless wraps the function return in {data: ..., type: ...}
+    payload = data.get("data", data) if isinstance(data, dict) else data
+    if isinstance(payload, dict) and payload.get("errors"):
+        raise LeetCodeV2Error(f"LeetCode GraphQL errors: {payload['errors']}")
     log.info("leetcode_browserless_call_succeeded")
-    return data
+    return payload
 
 
-def _mock_pool() -> list[ProblemRecord]:
-    """Canned problem set used when `LEETCODE_USERNAME` is unset/`mock`."""
-    canned = [
-        ("two-sum", "Two Sum", "easy", ["array", "hash-map"]),
-        ("binary-search", "Binary Search", "easy", ["array", "binary-search"]),
-        (
-            "longest-substring-without-repeating-characters",
-            "Longest Substring Without Repeating Characters",
-            "medium",
-            ["hash-map", "two-pointers"],
-        ),
-        ("merge-intervals", "Merge Intervals", "medium", ["array", "sorting"]),
-        (
-            "median-of-two-sorted-arrays",
-            "Median of Two Sorted Arrays",
-            "hard",
-            ["array", "binary-search", "divide-and-conquer"],
-        ),
-    ]
-    return [
-        ProblemRecord(
-            slug=slug,
-            title=title,
-            url=f"https://leetcode.com/problems/{slug}/",
-            difficulty=diff,
-            tags=tags,
+async def fetch_recent_solved(limit: int = 20) -> list[ProblemRecord]:
+    username = get_settings().leetcode_username
+    if not username:
+        return []
+    recent = await _post(_RECENT, {"username": username, "limit": min(limit, 20)})
+    records = []
+    for submission in recent.get("data", {}).get("recentAcSubmissionList") or []:
+        slug = str(submission["titleSlug"])
+        metadata = await _post(_META, {"filters": {"searchKeywords": slug}})
+        questions = metadata.get("data", {}).get("problemsetQuestionList", {}).get("questions", [])
+        exact = next((row for row in questions if row.get("titleSlug") == slug), None)
+        if exact is None:
+            raise LeetCodeV2Error(f"No exact canonical metadata match for {slug}")
+        records.append(
+            ProblemRecord(
+                slug=slug,
+                title=str(exact["title"]),
+                difficulty=str(exact["difficulty"]).lower(),
+                tags=",".join(str(tag["slug"]) for tag in exact.get("topicTags", [])),
+            )
         )
-        for slug, title, diff, tags in canned
-    ]
-
-
-async def refresh_pool() -> int:
-    """Fetch the user's recent accepted submissions and upsert into
-    `leetcode_problems` (FR-4.1).
-
-    The upsert preserves user-tracked state on existing rows:
-    - `solved` — never reset to false by a refresh (a problem solved once
-      stays solved; the LeetCode AC list only grows).
-    - `times_attempted` — never decremented.
-    - `last_attempted` — never overwritten with None.
-
-    For new rows (slug not in DB): inserted with `solved = true` (the user
-    has an AC submission, per the recent-ac list we just fetched) and
-    `times_attempted = 1`.
-
-    Returns the number of rows upserted (inserts + updates). On a fetch
-    failure, `fetch_problems` raises `LeetCodeFetchError` (e.g. Browserless
-    unavailable — FR-4.2 / architecture.md §12). The caller
-    (`_safe_refresh_pool` in cron.py) wraps this in the #008 alert handler.
-    """
-    settings = get_settings()
-    records = await fetch_problems(settings.leetcode_username)
-    upserted = 0
-    with next(get_session()) as session:
-        for rec in records:
-            existing = session.get(LeetCodeProblem, rec.slug)
-            if existing is None:
-                # New problem: the user has an AC submission for it, so
-                # mark solved=true + times_attempted=1.
-                session.add(
-                    LeetCodeProblem(
-                        slug=rec.slug,
-                        title=rec.title,
-                        url=rec.url,
-                        difficulty=rec.difficulty,
-                        tags=",".join(rec.tags),
-                        solved=True,
-                        times_attempted=1,
-                    )
-                )
-            else:
-                # Existing row: refresh metadata, preserve user state.
-                # `solved` only ever flips false→true (an AC submission
-                # confirms solved); never true→false.
-                existing.title = rec.title
-                existing.url = rec.url
-                existing.difficulty = rec.difficulty
-                existing.tags = ",".join(rec.tags)
-                if not existing.solved:
-                    existing.solved = True
-                session.add(existing)
-            upserted += 1
-        session.commit()
-    log.info("leetcode_refresh_done", upserted=upserted, username=settings.leetcode_username)
-    return upserted
+    return records

@@ -5,12 +5,13 @@ repo. Read this first, then the docs it points at.
 
 ## Current status
 
-**Phase 0 complete (FastAPI + Postgres + Alembic + Docker bootstrap).
-Phases 1–7 in progress.** The app boots, `/health` works (including the
-degraded state when the DB is down), migrations run, and Docker compose
-brings up app + Postgres together. The next action is **Phase 1** of
-[`docs/roadmap.md`](./docs/roadmap.md): the integration clients (issues
-#009–#014 in [`plan/issues/`](./plan/issues/)).
+**Implemented and locally verified; production deployment pending.**
+The app boots, `/health` works (including the degraded state when the DB
+is down), migrations run, and Docker compose brings up app + Postgres
+together. The scheduler runs in-process via the FastAPI lifespan. The
+next action is the **Cutover** section of
+[`docs/roadmap.md`](./docs/roadmap.md): deploy to Coolify and verify
+production.
 
 If you are picking up this repo cold, your job is almost certainly to
 continue the roadmap from where the checkboxes leave off. Do not redesign
@@ -19,22 +20,18 @@ Implement what the docs say.
 
 ## Reading order (do not skip)
 
-1. [`README.md`](./README.md) — 5-minute orientation: what this is, why a
-   port, status, stack, doc index.
+1. [`README.md`](./README.md) — 5-minute orientation: what this is,
+   status, stack, doc index.
 2. [`docs/business-requirements.md`](./docs/business-requirements.md) — the
    behavioral contract. What the system must do. **This is the source of
    truth for behavior.** If code and this doc disagree, the doc wins.
 3. [`docs/architecture.md`](./docs/architecture.md) — the design. How the
    system does it. Stack, repo layout, LLM client design, schema, env vars,
-   deploy. (The Google auth branch was removed 2026-07-31 — see
-   `docs/business-requirements.md` §8 decision 5.)
-4. [`docs/roadmap.md`](./docs/roadmap.md) — the 8-phase plan. Each phase
-   has explicit exit criteria. Do not skip phases; each one ships something
-   the next phase depends on.
-5. [`n8n-reference/README.md`](./n8n-reference/README.md) — the original n8n
-   v3 spec. **Read only when porting prompts or flow logic.** The prompts
-   in the n8n AI Agent nodes are ported **verbatim** into
-   `src/leetcode_coach/prompts/` — no rewriting, no "improving."
+   deploy.
+4. [`docs/roadmap.md`](./docs/roadmap.md) — the delivery plan. Each
+   section has explicit exit criteria.
+5. [`docs/live-proof.md`](./docs/live-proof.md) — the live acceptance
+   evidence and how to reproduce it.
 
 ## Operating rules
 
@@ -43,29 +40,15 @@ Implement what the docs say.
 - **Behavior:** `docs/business-requirements.md`.
 - **Design:** `docs/architecture.md`.
 - **Plan:** `docs/roadmap.md`.
-- **Prompts and flow logic (verbatim source):** the AI Agent node `text`
-  fields in `n8n-reference/workflows/flow-a-schedule-and-expiry.json` and
-  `n8n-reference/workflows/flow-b-telegram-and-coach.json`.
-- **Code:** `src/leetcode_coach/` (does not exist yet — Phase 0 creates it).
+- **Code:** `src/leetcode_coach/`.
 
 ### Do not
 
-- **Do not edit `n8n-reference/`.** It is frozen reference material. If the
-  spec feels wrong, the fix is to update `docs/business-requirements.md`
-  with an explicit decision, not to silently rewrite the reference.
-- **Do not rewrite the prompts.** Port them verbatim. If a prompt has a
-  bug, fix it in `docs/business-requirements.md` first, then in
-  `src/leetcode_coach/prompts/`, with a commit message that names the bug.
-  The n8n audit already identified the prompt-adjacent bugs (missing
-  unsolved pool, ~~missing Google Task notes append~~); those are called out
-  in `docs/roadmap.md` Phase 2 and Phase 3b. (The Google Task notes-append
-  bug is moot as of 2026-07-31 — the integration was removed; see
-  `docs/business-requirements.md` §8 decision 5.)
-- **Do not add Celery, Redis, a task queue, a separate worker process, an
-  LLM tool-calling loop, multi-user support, a web UI, or Browserless/
-  SearXNG integrations in v1.** `docs/architecture.md` §12 and
-  `docs/business-requirements.md` §7 explain why each is out of scope.
-  Adding them is scope creep, not initiative.
+- **Do not add Celery, Redis, a task queue, a separate worker process,
+  multi-user support, a web UI, or Browserless/SearXNG integrations.**
+  `docs/architecture.md` §12 and `docs/business-requirements.md` §7
+  explain why each is out of scope. Adding them is scope creep, not
+  initiative.
 - **Do not commit secrets.** All secrets are env vars (see
   `docs/architecture.md` §8). `.env.example` has keys only, never values.
 - **Do not "log with estimated defaults"** when an external call fails.
@@ -74,68 +57,55 @@ Implement what the docs say.
 
 ### Do
 
-- **Follow the phase order.** Each phase's exit criteria are non-negotiable.
-  If you can't satisfy them, you're not done with the phase.
+- **Follow the roadmap order.** Each section's exit criteria are
+  non-negotiable. If you can't satisfy them, you're not done.
 - **Write tests with the code, not after.** The coach pass is the highest-
-  risk piece (non-deterministic LLM output); it gets a golden-output test
-  in Phase 3b. The two n8n business-logic bugs get regression tests in
-  Phase 2 (unsolved pool) and Phase 3b (Google Task notes append).
+  risk piece (non-deterministic LLM output); it gets a golden-output test.
 - **Use the stack from `docs/architecture.md` §2.** Python 3.12, FastAPI,
   APScheduler, SQLModel, Alembic, httpx, tenacity, pydantic-settings,
   pytest + pytest-asyncio + respx + testcontainers-postgres, uv, Docker.
   Do not substitute (e.g., "I'll use Celery because I know it better") —
   the choices are documented and deliberate.
-- **Port prompts verbatim.** See above.
-- **Close the three n8n error-handling gaps for free** by relying on
-  `tenacity` (retries default-on), typed exceptions, and FastAPI's normal
-  error handling (the Telegram webhook route). These are not separate work
-  items. (The Google auth typed-exception branch was removed 2026-07-31
-  along with the integration — see `docs/business-requirements.md` §8
-  decision 5.)
-- **Update `docs/roadmap.md` checkboxes** as you complete phase items.
-  Mark the phase's todo `[x]` only when its exit criteria are met.
+- **Update `docs/roadmap.md` checkboxes** as you complete items. Mark a
+  todo `[x]` only when its exit criteria are met.
 
 ## Key gotchas a new agent must know
 
-1. **The unsolved-pool bug.** The n8n Flow A AI Agent was never given the
-   unsolved problem pool to choose from — it only saw `solved = true`
-   rows. The Python port must read `leetcode_problems WHERE solved = false`
-   and pass that into the propose prompt. Regression test in Phase 2.
+1. **The unsolved-pool bug.** The original n8n Flow A AI Agent was never
+   given the unsolved problem pool to choose from — it only saw
+   `solved = true` rows. The Python port reads
+   `leetcode_problems WHERE solved = false` and passes that into the
+   propose prompt. Regression test covers this.
 2. **Lesson graduation is double-gated.** Coach says
    `lesson_should_graduate = true` **AND** the DB row's
    `times_reinforced >= 5`. Read the count from the DB, not from the
    coach. The coach hallucinating a count is a known failure mode.
-3. **The 5-list candidate array must be persisted somewhere Flow B can
-   read it.** The n8n version used a Data Table; the Python port needs
-   either a `daily_candidates` table or `pending_review` rows pre-inserted
-   with `status = proposed`. Phase 3a of the roadmap flags this as a
-   decision to make in that phase. Don't punt it.
+3. **The 5-list candidate array must be persisted somewhere the webhook
+   can read it.** The system uses `pending_review` rows pre-inserted with
+   `status = proposed`.
 4. **Timezone is Europe/Bucharest.** All cron jobs use it. All dates in
    the DB are `DATE` (not `TIMESTAMPTZ`) because the system is
    single-timezone. See `docs/architecture.md` §7.
 
 ## Open decisions (do not resolve without data)
 
-`docs/business-requirements.md` §8 lists 5 open decisions. They are
+`docs/business-requirements.md` §8 lists open decisions. They are
 **intentionally unresolved** — they need real runtime data to settle. Do
-not pick a value just to "close the loop." Phase 7 of the roadmap is where
-calibration happens.
+not pick a value just to "close the loop."
 
-## When you finish a phase
+## When you finish a roadmap section
 
-1. Verify every checkbox in that phase's section of `docs/roadmap.md` is
-   `[x]`.
-2. Verify the phase's **Exit criteria** block is satisfied.
+1. Verify every checkbox in that section of `docs/roadmap.md` is `[x]`.
+2. Verify the section's **Exit criteria** block is satisfied.
 3. Run the test suite. It must be green.
-4. Commit with a message that names the phase: e.g.,
-   `phase 0: bootstrap (fastapi + postgres + alembic + docker)`.
-5. Tell the user which phase is done and what the next phase is.
+4. Commit with a message that names the section.
+5. Tell the user which section is done and what the next one is.
 
 ## When you're blocked
 
 - If a doc feels wrong, say so explicitly. Don't silently work around it.
 - If an exit criterion can't be met, stop and report. Don't declare the
-  phase done.
+  section done.
 - If you're tempted to add scope (a feature, a tool, a service), check
   `docs/architecture.md` §12 and `docs/business-requirements.md` §7 first.
   If it's listed there as out of scope, the answer is no.

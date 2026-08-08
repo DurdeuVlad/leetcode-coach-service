@@ -1,213 +1,136 @@
-"""FastAPI application entrypoint.
-
-Single responsibility (per #034): wire the app + lifespan + routes.
-Business logic lives in `flows/`; scheduled work runs in the separate
-scheduler service and the lifespan only owns API resources.
-
-Architecture refs:
-- §4: one container, APScheduler in-process via lifespan.
-- §9: `/health` returns 200 iff DB reachable; scheduler field reports
-  running/not_started.
-- §11: structured JSON logs to stdout via structlog.
-"""
+"""FastAPI entry point for the LeetCode Coach service."""
 
 from __future__ import annotations
 
-import logging
-import time
-from collections.abc import AsyncIterator
+import secrets
 from contextlib import asynccontextmanager
 
 import structlog
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Header, Request, Response
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
+from sqlmodel import Session
 
+from leetcode_coach.application import CoachApplication
 from leetcode_coach.config import get_settings
-from leetcode_coach.db.base import engine
-from leetcode_coach.flows.interactive import register_handlers
-from leetcode_coach.flows.nudge import register_handlers as register_nudge_handlers
+from leetcode_coach.db.base import create_db_engine
+from leetcode_coach.domain.services import CoachDomain
 from leetcode_coach.integrations.telegram import set_webhook
-from leetcode_coach.webhooks.telegram import router as telegram_router
+from leetcode_coach.scheduler import SchedulerHandle, start_scheduler, stop_scheduler
 
-
-def _configure_logging(level: str) -> None:
-    """structlog → JSON to stdout. Configured once at startup."""
-    logging.basicConfig(format="%(message)s", level=getattr(logging, level.upper(), logging.INFO))
-    structlog.configure(
-        processors=[
-            structlog.contextvars.merge_contextvars,
-            structlog.processors.add_log_level,
-            structlog.processors.TimeStamper(fmt="iso"),
-            structlog.processors.JSONRenderer(),
-        ],
-        wrapper_class=structlog.make_filtering_bound_logger(
-            getattr(logging, level.upper(), logging.INFO)
-        ),
-        cache_logger_on_first_use=True,
-    )
+log = structlog.get_logger("webhook")
+settings = get_settings()
+engine = create_db_engine(settings.database_url)
+coach = CoachApplication(engine)
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Startup: configure logging and register the inbound webhook."""
-    settings = get_settings()
-    _configure_logging(settings.log_level)
-    log = structlog.get_logger("lifespan")
-
-    # Startup diagnostics — one structured block so the operator can see at
-    # a glance which integrations are live vs mock/disabled. This is the
-    # single place to look when "the bot doesn't respond": each line says
-    # whether the corresponding inbound/outbound path is wired.
-    db_ok = True
+async def lifespan(_: FastAPI):
+    # Start the in-process APScheduler. The pg advisory lock ensures only
+    # one scheduler instance fires jobs even if multiple containers run.
+    # entrypoint.sh runs migrations before the app boots, so the schema
+    # is ready by the time we get here.
+    scheduler_handle: SchedulerHandle | None = None
     try:
-        with engine.connect() as conn:
-            conn.execute(text("SELECT 1"))
+        scheduler_handle = await start_scheduler()
     except Exception as e:
-        db_ok = False
-        log.error("startup_db_unreachable", error=str(e))
+        log.error("scheduler_start_failed", error=str(e))
 
-    log.info(
-        "startup",
-        timezone=settings.timezone,
-        db="reachable" if db_ok else "unreachable",
-        telegram_bot_token="set" if settings.telegram_bot_token else "empty",
-        telegram_chat_id=settings.telegram_chat_id,
-        webhook_url=settings.telegram_webhook_url or None,
-        webhook_secret="set" if settings.telegram_webhook_secret else "empty",
-        openai_api_key="set" if settings.openai_api_key else "empty",
-        openai_mock_mode=settings.openai_api_key.lower() == "mock",
-        gemini_api_key="set" if settings.gemini_api_key else "empty",
-        admin_api_enabled=bool(settings.admin_api_key),
-        browserless_url=settings.browserless_url or None,
-        searxng_url=settings.searxng_url or None,
-        leetcode_username=settings.leetcode_username,
-        log_level=settings.log_level,
-    )
-
-    # Register the Telegram webhook if a public URL is configured (#030).
-    # No-op in mock mode (dummy/empty token) — the app still boots for local dev.
     if settings.telegram_webhook_url:
         try:
-            await set_webhook(settings.telegram_webhook_url)
+            await set_webhook(settings.telegram_webhook_url.rstrip("/") + "/telegram/webhook")
             log.info("webhook_registered", url=settings.telegram_webhook_url)
         except Exception as e:
             log.error("webhook_registration_failed", error=str(e))
     else:
-        log.warning(
-            "webhook_skipped",
-            reason="TELEGRAM_WEBHOOK_URL not set — bot will NOT receive Telegram updates",
-        )
+        log.warning("webhook_skipped", reason="TELEGRAM_WEBHOOK_URL not set")
 
     try:
         yield
     finally:
-        engine.dispose()
-        log.info("shutdown", msg="db engine disposed")
+        if scheduler_handle is not None:
+            stop_scheduler(scheduler_handle)
 
 
-app = FastAPI(title="LeetCode Coach", version="0.1.0", lifespan=lifespan)
-register_handlers()
-register_nudge_handlers()
-# Inbound Telegram webhook (#019) — the single inbound HTTP surface.
-app.include_router(telegram_router)
-
-# Admin API — only mounted when ADMIN_API_KEY is set (disabled by default).
-# Used for automated end-to-end testing via HTTP (Flow A → pick → coach).
-if get_settings().admin_api_key:
-    from leetcode_coach.webhooks.admin import router as admin_router
-
-    app.include_router(admin_router)
-
-
-# HTTP request/response logging middleware — logs every inbound request with
-# method, path, status, and duration. This is the missing piece for runtime
-# observability: without it, a webhook hit that 500s or an admin call that
-# hangs leaves no trace in the logs. Health checks are excluded to avoid
-# spam (Coolify pings /health frequently).
-_access_log = structlog.get_logger("http")
-
-
-@app.middleware("http")
-async def log_requests(request: Request, call_next):  # type: ignore[no-untyped-def]
-    """Log every HTTP request with method, path, status, duration_ms.
-
-    Skips ``/health`` to avoid log spam from Coolify's health probe.
-    """
-    if request.url.path in ("/health", "/health/deep"):
-        return await call_next(request)
-    start = time.monotonic()
-    status_code: int | None = None
-    try:
-        response = await call_next(request)
-        status_code = response.status_code
-        return response
-    except Exception:
-        status_code = 500
-        raise
-    finally:
-        duration_ms = int((time.monotonic() - start) * 1000)
-        _access_log.info(
-            "request",
-            method=request.method,
-            path=request.url.path,
-            status=status_code,
-            duration_ms=duration_ms,
-            client=request.client.host if request.client else None,
-        )
+app = FastAPI(title="LeetCode Coach", version="2.0.0", lifespan=lifespan)
 
 
 @app.get("/health")
-async def health(response: Response) -> dict[str, str]:
-    """Lightweight liveness probe for the webhook/API process.
-
-    Coolify pings this every few seconds, so it must be cheap: no external
-    HTTP calls. Use ``/health/deep`` for the full external-service probes.
-    200 iff DB reachable. Scheduler liveness is checked by its own service.
-    """
-    db_ok = True
+def health() -> dict[str, str]:
     try:
-        with engine.connect() as conn:
-            conn.execute(text("SELECT 1"))
+        with Session(engine) as session:
+            session.exec(text("SELECT 1"))
     except Exception:
-        db_ok = False
-
-    response.status_code = 200 if db_ok else 503
-    return {
-        "status": "ok" if db_ok else "degraded",
-        "db": "reachable" if db_ok else "unreachable",
-    }
+        return {"status": "degraded", "database": "down"}
+    return {"status": "ok", "database": "up"}
 
 
-@app.get("/health/deep")
-async def health_deep(response: Response) -> dict[str, object]:
-    """Full diagnostic probe — DB + every external service.
-
-    Runs the cheapest possible authenticated round-trip per integration
-    (Telegram getMe, OpenAI 1-token completion, etc.). Mock and disabled
-    services are reported as such — they are not probed. A probe failure
-    never flips the HTTP status; it only surfaces in the payload so an
-    operator can see which integration is down without grepping logs.
-
-    Use this for on-demand diagnostics, not for Coolify's liveness pings
-    (that would rate-limit external APIs). The terminal ``:ping`` command
-    calls the same ``ping_all()`` function.
-    """
-    db_ok = True
+@app.post("/telegram/webhook")
+async def telegram_webhook(
+    request: Request,
+    x_telegram_bot_api_secret_token: str | None = Header(
+        default=None, alias="X-Telegram-Bot-Api-Secret-Token"
+    ),
+) -> Response:
+    if settings.telegram_webhook_secret and (
+        x_telegram_bot_api_secret_token is None
+        or not secrets.compare_digest(
+            x_telegram_bot_api_secret_token, settings.telegram_webhook_secret
+        )
+    ):
+        return Response(status_code=200)
     try:
-        with engine.connect() as conn:
-            conn.execute(text("SELECT 1"))
-    except Exception:
-        db_ok = False
+        payload = await request.json()
+        update_id = int(payload["update_id"])
+        callback = payload.get("callback_query")
+        message = payload.get("message")
+        if callback:
+            chat_id = int(callback["message"]["chat"]["id"])
+        elif message:
+            chat_id = int(message["chat"]["id"])
+        else:
+            return Response(status_code=200)
+    except (KeyError, TypeError, ValueError):
+        log.warning("malformed_update")
+        return Response(status_code=200)
+    if str(chat_id) != str(settings.telegram_chat_id):
+        return Response(status_code=200)
 
-    response.status_code = 200 if db_ok else 503
-
-    from leetcode_coach.integrations.connectivity import ping_all
-
-    probes = await ping_all()
-    services = {r.name: {"status": r.status, "detail": r.detail} for r in probes}
-
-    return {
-        "status": "ok" if db_ok else "degraded",
-        "db": "reachable" if db_ok else "unreachable",
-        "services": services,
-    }
+    with Session(engine) as session:
+        domain = CoachDomain(session)
+        if not domain.record_update(update_id, chat_id):
+            status = domain.processed_update_status(update_id)
+            return Response(status_code=503 if status == "received" else 200)
+        try:
+            session.commit()
+        except IntegrityError:
+            session.rollback()
+            return Response(status_code=200)
+    try:
+        if callback:
+            await coach.handle_callback(
+                chat_id=chat_id,
+                callback_id=str(callback["id"]),
+                data=str(callback.get("data", "")),
+            )
+        else:
+            text_value = message.get("text") or message.get("caption")
+            if not text_value:
+                return Response(status_code=200)
+            reply = message.get("reply_to_message") or {}
+            await coach.handle_text(
+                chat_id=chat_id,
+                text=str(text_value),
+                message_id=int(message["message_id"]),
+                reply_to_message_id=int(reply["message_id"]) if reply.get("message_id") else None,
+            )
+        with Session(engine) as session:
+            CoachDomain(session).mark_update_handled(update_id)
+            session.commit()
+    except Exception as exc:
+        log.exception("update_failed", update_id=update_id, error=str(exc))
+        with Session(engine) as session:
+            CoachDomain(session).mark_update_handled(update_id, str(exc))
+            session.commit()
+        return Response(status_code=503)
+    return Response(status_code=200)

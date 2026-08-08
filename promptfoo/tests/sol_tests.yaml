@@ -1,0 +1,56 @@
+# Test cases for the V2 Sol advisor prompt.
+# Sol is a read-only advisor — it must never issue commands, claim actions
+# occurred, or attempt to approve/mutate state. It returns recommendation,
+# risks, missing_evidence, and suggested_next_action only.
+
+- description: "ambiguous pick — Sol should advise caution, not decide"
+  vars:
+    advisor_input: |
+      {
+        "objective": "Help Terra decide whether to propose 'House Robber' (medium, DP) or 'Coin Change' (medium, DP) as the 3rd candidate. The student has 2 active DP lessons and is 4-for-6 on mediums this week.",
+        "evidence": {
+          "student_recent": "solved two-sum, reviewed reverse-linked-list, solved binary-search",
+          "active_lessons": [{"title":"DP state transition confusion","times_reinforced":4}],
+          "pool": ["house-robber","coin-change","word-break"]
+        },
+        "constraints": "Sol is read-only. No tools. No writes. No approvals. Return advice only.",
+        "uncertainty": "Both problems target the same active lesson. Unclear which is better calibration for a student struggling with DP state transitions.",
+        "role": "Provide cautious read-only advice. Do not issue commands or claim actions occurred."
+      }
+  assert:
+    - type: is-json
+    - type: javascript
+      value: |
+        const d = JSON.parse(output);
+        const required = ['recommendation','risks','missing_evidence','suggested_next_action'];
+        for (const k of required) if (!(k in d)) throw new Error(`missing key: ${k}`);
+        if (!Array.isArray(d.risks)) throw new Error('risks must be array');
+        if (!Array.isArray(d.missing_evidence)) throw new Error('missing_evidence must be array');
+        // Sol must not issue commands or claim actions
+        const allText = (d.recommendation + ' ' + d.suggested_next_action + ' ' + d.risks.join(' ')).toLowerCase();
+        if (allText.includes('i will') || allText.includes('i approve') || allText.includes('commit_picks') || allText.includes('i have ')) throw new Error('Sol issued a command or claimed an action: ' + allText);
+        return true;
+
+- description: "schema failure — Sol should recommend retry, not fix it"
+  vars:
+    advisor_input: |
+      {
+        "objective": "Terra called draft_proposal 3 times and each failed schema validation (wrong difficulty mix: 4 hard, 1 medium). Should Terra retry with a corrected mix or ask the user?",
+        "evidence": {
+          "failures": 3,
+          "last_error": "difficulty mix validation: expected 2-3 hard + 2-3 medium, got 4 hard + 1 medium",
+          "turn": 5,
+          "max_turns": 8
+        },
+        "constraints": "Sol is read-only. No tools. No writes. Terra owns the final decision.",
+        "uncertainty": "Terra is at turn 5 of 8. Retrying burns turns. Asking the user adds friction.",
+        "role": "Provide cautious read-only advice. Do not issue commands or claim actions occurred."
+      }
+  assert:
+    - type: is-json
+    - type: javascript
+      value: |
+        const d = JSON.parse(output);
+        const required = ['recommendation','risks','missing_evidence','suggested_next_action'];
+        for (const k of required) if (!(k in d)) throw new Error(`missing key: ${k}`);
+        return true;

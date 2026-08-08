@@ -40,10 +40,11 @@ jobs:
       # Tests that need integrations use respx mocks; no real keys in CI.
       TELEGRAM_BOT_TOKEN: test-token
       OPENAI_API_KEY: test-key
-      GEMINI_API_KEY: test-key
       TELEGRAM_CHAT_ID: "123456"
       LEETCODE_USERNAME: test-user
       TIMEZONE: Europe/Bucharest
+      BROWSERLESS_URL: ""
+      BROWSERLESS_TOKEN: ""
 
     steps:
       - uses: actions/checkout@v4
@@ -70,4 +71,4 @@ jobs:
         run: uv run alembic upgrade head
 
       - name: Pytest
-        run: uv run pytest -q
+        run: uv run pytest tests/ -q

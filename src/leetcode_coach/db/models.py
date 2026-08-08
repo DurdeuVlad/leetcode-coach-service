@@ -1,52 +1,46 @@
-"""SQLModel table definitions — the 4 tables from business-requirements.md §5.
+"""Fresh, PostgreSQL-compatible persistence model for Coach V2.
 
-Tables:
-- leetcode_problems: the problem pool (PK = slug)
-- leetcode_log: attempt history
-- pending_review: tracks up to 2 concurrent open problems per day
-- tutor_lessons: the memory system (active/reinforced/graduated lessons)
-
-Schema choices (architecture.md §7):
-- `slug` is the PK of leetcode_problems (LeetCode slugs are stable).
-- pending_review has no DB-level "at most 2 open per day" constraint — that's
-  enforced in application code (Flow A caps picks at 2).
-- tutor_lessons.title is not unique by DB constraint; dedup is by similarity
-  match in flow_b.py before insert.
-- All dates are DATE (not TIMESTAMPTZ) — the system is single-timezone.
-
-NOTE: no `from __future__ import annotations` here, and we use `datetime.date`
-rather than `from datetime import date` — the `LeetCodeLog.date` field name
-would otherwise shadow the `date` type within the class body and break
-pydantic's annotation resolution.
+All user-specific state has a ``chat_id`` even though V2 is currently
+single-user.  This keeps Telegram idempotency and run serialisation explicit
+without pretending that one chat can read another chat's state.
 """
 
-import datetime
+import datetime as dt
 from decimal import Decimal
 from enum import Enum
 
 import sqlalchemy as sa
 from sqlmodel import Field
 
-from leetcode_coach.db.base import SQLModel  # re-export for Alembic env.py
+from leetcode_coach.db.base import BaseSQLModel
 
 
-class ReviewStatus(str, Enum):
-    """Persisted lifecycle states for a problem review."""
+def utcnow() -> dt.datetime:
+    return dt.datetime.now(dt.UTC)
 
+
+def as_utc(value: dt.datetime) -> dt.datetime:
+    """Normalize database timestamps before Python-side comparisons.
+
+    PostgreSQL ``timestamp without time zone`` and SQLite both reload values
+    without ``tzinfo`` even when the inserted value represented UTC.
+    """
+    if value.tzinfo is None:
+        return value.replace(tzinfo=dt.UTC)
+    return value.astimezone(dt.UTC)
+
+
+class Difficulty(str, Enum):
+    EASY = "easy"
+    MEDIUM = "medium"
+    HARD = "hard"
+
+
+class ProposalStatus(str, Enum):
     OPEN = "open"
-    COACHING = "coaching"
-    DONE = "done"
-    SKIPPED = "skipped"
-    SAW_SOLUTION = "saw_solution"
-    EXPIRED = "expired"
-
-
-class ProposalBatchStatus(str, Enum):
-    CREATED = "created"
-    ACTIVE = "active"
     PICKED = "picked"
-    CANCELLED = "cancelled"
     EXPIRED = "expired"
+    CANCELLED = "cancelled"
 
 
 class CandidateStatus(str, Enum):
@@ -55,225 +49,231 @@ class CandidateStatus(str, Enum):
     CANCELLED = "cancelled"
 
 
-class ProcessedUpdateStatus(str, Enum):
-    RECEIVED = "received"
-    HANDLED = "handled"
+class ReviewStatus(str, Enum):
+    OPEN = "open"
+    DONE = "done"
+    SKIPPED = "skipped"
+    SAW_SOLUTION = "saw_solution"
+    EXPIRED = "expired"
+
+
+class ApprovalStatus(str, Enum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    EXPIRED = "expired"
+
+
+class AgentRunStatus(str, Enum):
+    RUNNING = "running"
+    PAUSED = "paused"
+    COMPLETED = "completed"
     FAILED = "failed"
 
 
-class CreditReason(str, Enum):
-    DAILY_TAX = "daily_tax"
-    SOLVED = "solved"
-    REVIEWED = "reviewed"
-    SAW_SOLUTION = "saw_solution"
-    SKIPPED = "skipped"
-
-
-class LeetCodeProblem(SQLModel, table=True):
-    """A LeetCode problem in the pool. PK = slug (stable across refreshes)."""
-
-    __tablename__ = "leetcode_problems"
+class V2Problem(BaseSQLModel, table=True):
+    __tablename__ = "v2_problems"
 
     slug: str = Field(primary_key=True, max_length=200)
     title: str = Field(max_length=300)
     url: str = Field(max_length=500)
-    difficulty: str = Field(max_length=10)  # easy / medium / hard
-    tags: str = Field(default="", max_length=500)  # comma-separated
-    solved: bool = Field(default=False)
-    last_attempted: datetime.date | None = Field(default=None)
+    difficulty: Difficulty = Field(sa_column=sa.Column(sa.String(10), nullable=False, index=True))
+    tags: str = Field(default="", max_length=1000)
+    solved: bool = Field(default=False, index=True)
+    eligible: bool = Field(default=True, index=True)
+    last_attempted: dt.date | None = Field(default=None)
     times_attempted: int = Field(default=0)
+    created_at: dt.datetime = Field(default_factory=utcnow)
+    updated_at: dt.datetime = Field(default_factory=utcnow)
 
 
-class LeetCodeLog(SQLModel, table=True):
-    """A single attempt log entry. Append-only."""
-
-    __tablename__ = "leetcode_log"
+class V2Attempt(BaseSQLModel, table=True):
+    __tablename__ = "v2_attempts"
+    __table_args__ = (sa.UniqueConstraint("legacy_attempt_id", name="uq_v2_attempt_legacy_id"),)
 
     id: int | None = Field(default=None, primary_key=True)
-    problem_slug: str = Field(max_length=200, foreign_key="leetcode_problems.slug")
-    date: datetime.date = Field(default_factory=datetime.date.today)
-    status: str = Field(max_length=20)  # solved / reviewed / skipped / saw_solution
+    legacy_attempt_id: int | None = Field(default=None, index=True)
+    chat_id: int = Field(sa_column=sa.Column(sa.BigInteger, nullable=False, index=True))
+    review_id: int | None = Field(default=None, foreign_key="v2_pending_reviews.id", index=True)
+    problem_slug: str = Field(foreign_key="v2_problems.slug", max_length=200, index=True)
+    attempted_on: dt.date = Field(default_factory=dt.date.today, index=True)
+    outcome: str = Field(max_length=30)
+    feedback: str = Field(default="", max_length=4000)
     time_spent_min: int | None = Field(default=None)
-    tutor_feedback: str | None = Field(default=None)
-    lesson_title: str | None = Field(default=None)
-    credits_earned: Decimal = Field(
-        default=Decimal("0"),
-        sa_column=sa.Column(sa.Numeric(8, 2), nullable=False, server_default="0"),
-    )
+    created_at: dt.datetime = Field(default_factory=utcnow)
 
 
-class ProposalBatch(SQLModel, table=True):
-    """One interactive Telegram proposal message and its candidate list."""
-
-    __tablename__ = "proposal_batches"
+class V2Lesson(BaseSQLModel, table=True):
+    __tablename__ = "v2_lessons"
+    __table_args__ = (sa.UniqueConstraint("legacy_lesson_id", name="uq_v2_lesson_legacy_id"),)
 
     id: int | None = Field(default=None, primary_key=True)
-    proposed_at: datetime.date = Field(default_factory=datetime.date.today, index=True)
-    telegram_message_id: int | None = Field(default=None, unique=True, index=True)
-    status: ProposalBatchStatus = Field(
-        default=ProposalBatchStatus.CREATED,
-        sa_column=sa.Column(sa.String(20), nullable=False, server_default="created", index=True),
-    )
-    expires_at: datetime.date | None = Field(default=None, index=True)
-    extended_until: datetime.date | None = Field(default=None)
-
-
-class PendingReview(SQLModel, table=True):
-    """Tracks up to 2 concurrent open problems per day.
-
-    Correlation key is `message_id` (the Telegram per-problem message ID).
-    Flow B looks up this table by reply_to_message.message_id.
-    """
-
-    __tablename__ = "pending_review"
-
-    id: int | None = Field(default=None, primary_key=True)
-    __table_args__ = (
-        # Historical reviews have no candidate link. Every new, batch-backed
-        # selection must consume one of the two persisted slots, making the
-        # cap enforceable even if an application path regresses.
-        sa.CheckConstraint(
-            "candidate_id IS NULL OR (batch_id IS NOT NULL AND pick_slot IN (1, 2))",
-            name="ck_review_pick_slot",
-        ),
-        sa.UniqueConstraint("candidate_id", name="uq_pending_review_candidate"),
-        sa.UniqueConstraint("batch_id", "pick_slot", name="uq_pending_review_batch_pick_slot"),
-    )
-
-    message_id: int = Field(index=True)  # Telegram per-problem message_id
-    problem_slug: str = Field(max_length=200, foreign_key="leetcode_problems.slug")
-    problem_title: str = Field(max_length=300)  # denormalized for fuzzy match
-    proposed_at: datetime.date = Field(default_factory=datetime.date.today, index=True)
-    batch_id: int | None = Field(default=None, foreign_key="proposal_batches.id", index=True)
-    candidate_id: int | None = Field(default=None, foreign_key="daily_candidates.id", index=True)
-    pick_slot: int | None = Field(default=None)
-    status: ReviewStatus = Field(
-        default=ReviewStatus.OPEN,
-        sa_column=sa.Column(sa.String(20), nullable=False, server_default="open", index=True),
-    )
-
-
-class TutorLesson(SQLModel, table=True):
-    """The memory system — generalizable patterns the user is reinforcing.
-
-    Graduation is double-gated (FR-2.6):
-    - coach says lesson_should_graduate = true
-    - AND times_reinforced >= 5 (read from DB, not from the coach)
-    On graduation: active = false.
-    """
-
-    __tablename__ = "tutor_lessons"
-
-    id: int | None = Field(default=None, primary_key=True)
+    legacy_lesson_id: int | None = Field(default=None, index=True)
+    chat_id: int = Field(sa_column=sa.Column(sa.BigInteger, nullable=False, index=True))
     title: str = Field(max_length=300)
-    category: str = Field(max_length=100)
-    created_at: datetime.date = Field(default_factory=datetime.date.today)
-    times_reinforced: int = Field(default=1)
+    category: str = Field(default="general", max_length=100)
     active: bool = Field(default=True, index=True)
+    times_reinforced: int = Field(default=1)
+    created_at: dt.date = Field(default_factory=dt.date.today)
+    updated_at: dt.datetime = Field(default_factory=utcnow)
 
 
-class DailyCandidate(SQLModel, table=True):
-    """The 5-candidate list Flow A proposes each day (issue #020 decision).
+class V2ProposalBatch(BaseSQLModel, table=True):
+    __tablename__ = "v2_proposal_batches"
 
-    Persistence decision (architecture.md §7): a dedicated `daily_candidates`
-    table — NOT pre-inserted `pending_review` rows. Rationale:
-    - Preserves the FR-2.2 routing invariant: the 5-list Telegram message_id
-      is never stored in `pending_review`, so a reply to the 5-list is
-      distinguishable from a reply to a per-problem thread (lookup by
-      `reply_to_message.message_id` misses → pick-parse path).
-    - Keeps `pending_review` semantics clean (only per-problem threads).
-    - The ≤2-open-per-day rule is enforced by Flow B's pick cap (≤2 picks),
-      not by this table.
+    id: int | None = Field(default=None, primary_key=True)
+    chat_id: int = Field(sa_column=sa.Column(sa.BigInteger, nullable=False, index=True))
+    proposed_on: dt.date = Field(default_factory=dt.date.today, index=True)
+    status: ProposalStatus = Field(
+        default=ProposalStatus.OPEN,
+        sa_column=sa.Column(sa.String(20), nullable=False, index=True),
+    )
+    telegram_message_id: int | None = Field(
+        default=None, sa_column=sa.Column(sa.BigInteger, nullable=True, index=True)
+    )
+    expires_at: dt.datetime = Field(
+        default_factory=lambda: utcnow() + dt.timedelta(hours=24), index=True
+    )
+    extended_until: dt.datetime | None = Field(default=None)
+    created_at: dt.datetime = Field(default_factory=utcnow)
 
-    Flow A writes 5 rows per day (one per candidate, indexed 1..5). Flow B's
-    pick-parse reads today's rows ordered by `pick_index` and maps the user's
-    pick numbers (1-based) → candidates. YAGNI: no historical archive, no
-    extra metadata — just enough to map a pick number → problem for today.
-    """
 
-    __tablename__ = "daily_candidates"
-
+class V2ProposalCandidate(BaseSQLModel, table=True):
+    __tablename__ = "v2_proposal_candidates"
     __table_args__ = (
-        sa.UniqueConstraint("batch_id", "pick_index", name="uq_daily_candidate_batch_pick_index"),
+        sa.UniqueConstraint("batch_id", "position", name="uq_v2_candidate_position"),
+        sa.UniqueConstraint("batch_id", "problem_slug", name="uq_v2_candidate_problem"),
     )
 
     id: int | None = Field(default=None, primary_key=True)
-    batch_id: int | None = Field(default=None, foreign_key="proposal_batches.id", index=True)
-    proposed_at: datetime.date = Field(default_factory=datetime.date.today, index=True)
-    pick_index: int = Field(default=0)  # 1-based position in the 5-list (1..5)
-    slug: str = Field(max_length=200, foreign_key="leetcode_problems.slug")
-    title: str = Field(max_length=300)
-    url: str = Field(max_length=500)
-    tags: str = Field(default="", max_length=500)
-    difficulty: str = Field(max_length=10)  # easy / medium / hard
-    reasoning: str = Field(default="", max_length=1000)
-    coaching_hint: str = Field(default="", max_length=1000)
+    batch_id: int = Field(foreign_key="v2_proposal_batches.id", index=True)
+    position: int = Field()
+    problem_slug: str = Field(foreign_key="v2_problems.slug", max_length=200, index=True)
+    reasoning: str = Field(default="", max_length=2000)
+    coaching_hint: str = Field(default="", max_length=2000)
     status: CandidateStatus = Field(
         default=CandidateStatus.AVAILABLE,
-        sa_column=sa.Column(sa.String(20), nullable=False, server_default="available", index=True),
+        sa_column=sa.Column(sa.String(20), nullable=False, index=True),
     )
 
 
-class ProcessedUpdate(SQLModel, table=True):
-    """Telegram delivery idempotency record, keyed by Telegram update_id."""
+class V2PendingReview(BaseSQLModel, table=True):
+    __tablename__ = "v2_pending_reviews"
+    __table_args__ = (sa.UniqueConstraint("candidate_id", name="uq_v2_review_candidate"),)
 
-    __tablename__ = "processed_updates"
+    id: int | None = Field(default=None, primary_key=True)
+    chat_id: int = Field(sa_column=sa.Column(sa.BigInteger, nullable=False, index=True))
+    candidate_id: int | None = Field(
+        default=None, foreign_key="v2_proposal_candidates.id", index=True
+    )
+    batch_id: int | None = Field(default=None, foreign_key="v2_proposal_batches.id", index=True)
+    problem_slug: str = Field(foreign_key="v2_problems.slug", max_length=200, index=True)
+    telegram_message_id: int | None = Field(
+        default=None, sa_column=sa.Column(sa.BigInteger, nullable=True, index=True)
+    )
+    proposed_on: dt.date = Field(default_factory=dt.date.today, index=True)
+    status: ReviewStatus = Field(
+        default=ReviewStatus.OPEN,
+        sa_column=sa.Column(sa.String(20), nullable=False, index=True),
+    )
+    created_at: dt.datetime = Field(default_factory=utcnow)
+    updated_at: dt.datetime = Field(default_factory=utcnow)
 
-    update_id: int = Field(primary_key=True)
-    received_at: datetime.datetime = Field(
-        default_factory=lambda: datetime.datetime.now(datetime.UTC),
-        sa_column=sa.Column(sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
-    )
-    status: ProcessedUpdateStatus = Field(
-        default=ProcessedUpdateStatus.RECEIVED,
-        sa_column=sa.Column(sa.String(20), nullable=False, server_default="received", index=True),
-    )
+
+class V2CreditLedger(BaseSQLModel, table=True):
+    __tablename__ = "v2_credit_ledger"
+
+    id: int | None = Field(default=None, primary_key=True)
+    chat_id: int = Field(sa_column=sa.Column(sa.BigInteger, nullable=False, index=True))
+    idempotency_key: str = Field(max_length=200, unique=True, index=True)
+    amount: Decimal = Field(sa_column=sa.Column(sa.Numeric(10, 2), nullable=False))
+    reason: str = Field(max_length=50, index=True)
+    effective_on: dt.date = Field(default_factory=dt.date.today, index=True)
+    review_id: int | None = Field(default=None, foreign_key="v2_pending_reviews.id", index=True)
+    created_at: dt.datetime = Field(default_factory=utcnow)
+
+
+class V2BotState(BaseSQLModel, table=True):
+    __tablename__ = "v2_bot_state"
+    __table_args__ = (sa.UniqueConstraint("chat_id", "key", name="uq_v2_bot_state_chat_key"),)
+
+    id: int | None = Field(default=None, primary_key=True)
+    chat_id: int = Field(sa_column=sa.Column(sa.BigInteger, nullable=False, index=True))
+    key: str = Field(max_length=100)
+    value: str = Field(default="", max_length=4000)
+    updated_at: dt.datetime = Field(default_factory=utcnow)
+
+
+class V2ProcessedUpdate(BaseSQLModel, table=True):
+    __tablename__ = "v2_processed_updates"
+
+    update_id: int = Field(sa_column=sa.Column(sa.BigInteger, primary_key=True))
+    chat_id: int = Field(sa_column=sa.Column(sa.BigInteger, nullable=False, index=True))
+    status: str = Field(default="received", max_length=20, index=True)
+    received_at: dt.datetime = Field(default_factory=utcnow)
+    handled_at: dt.datetime | None = Field(default=None)
     error: str | None = Field(default=None, max_length=1000)
 
 
-class CreditLedger(SQLModel, table=True):
-    """Append-only, idempotent credit changes."""
-
-    __tablename__ = "credit_ledger"
+class V2ConversationItem(BaseSQLModel, table=True):
+    __tablename__ = "v2_conversation_items"
+    __table_args__ = (
+        sa.UniqueConstraint("chat_id", "sequence", name="uq_v2_conversation_sequence"),
+    )
 
     id: int | None = Field(default=None, primary_key=True)
-    idempotency_key: str = Field(max_length=200, unique=True, index=True)
-    amount: Decimal = Field(sa_column=sa.Column(sa.Numeric(8, 2), nullable=False))
-    reason: CreditReason = Field(
-        sa_column=sa.Column(sa.String(30), nullable=False, index=True),
+    chat_id: int = Field(sa_column=sa.Column(sa.BigInteger, nullable=False, index=True))
+    sequence: int = Field()
+    role: str = Field(max_length=20)
+    content: str = Field(sa_column=sa.Column(sa.Text, nullable=False))
+    created_at: dt.datetime = Field(default_factory=utcnow)
+
+
+class V2AgentRun(BaseSQLModel, table=True):
+    __tablename__ = "v2_agent_runs"
+
+    id: str = Field(primary_key=True, max_length=64)
+    chat_id: int = Field(sa_column=sa.Column(sa.BigInteger, nullable=False, index=True))
+    status: AgentRunStatus = Field(
+        default=AgentRunStatus.RUNNING,
+        sa_column=sa.Column(sa.String(20), nullable=False, index=True),
     )
-    review_id: int | None = Field(default=None, foreign_key="pending_review.id", index=True)
-    log_id: int | None = Field(default=None, foreign_key="leetcode_log.id", index=True)
-    created_at: datetime.datetime = Field(
-        default_factory=lambda: datetime.datetime.now(datetime.UTC),
-        sa_column=sa.Column(sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+    turn_count: int = Field(default=0)
+    sol_calls: int = Field(default=0)
+    model: str = Field(default="gpt-5.6-terra", max_length=80)
+    input_tokens: int = Field(default=0)
+    output_tokens: int = Field(default=0)
+    cache_read_tokens: int = Field(default=0)
+    cache_write_tokens: int = Field(default=0)
+    tool_calls: int = Field(default=0)
+    escalation_reason: str | None = Field(default=None, max_length=500)
+    latency_ms: int | None = Field(default=None)
+    state_json: str = Field(
+        default="{}", sa_column=sa.Column(sa.Text, nullable=False, server_default="{}")
     )
+    started_at: dt.datetime = Field(default_factory=utcnow)
+    updated_at: dt.datetime = Field(default_factory=utcnow)
+    completed_at: dt.datetime | None = Field(default=None)
 
 
-class BotState(SQLModel, table=True):
-    """Generic key-value table for runtime state that must survive restarts
-    but should not require a redeploy to change (issue #036).
+class V2PendingApproval(BaseSQLModel, table=True):
+    __tablename__ = "v2_pending_approvals"
 
-    First and currently only use: the pinned progression message ID
-    (FR-8.3, #039) under key ``pinned_message_id``.
-
-    Schema (business-requirements.md §5):
-    - ``key``: primary key (e.g. ``pinned_message_id``).
-    - ``value``: JSON-encoded string; the consumer parses per key. Keeping
-      the column a plain string avoids constraining the schema to today's
-      only use (YAGNI — no JSONB, no per-key columns).
-    - ``updated_at``: ``TIMESTAMPTZ`` (wall-clock time, not DATE) — set on
-      every write. This is the one table that needs real timestamps because
-      "last write" semantics matter for state freshness.
-
-    Intentionally generic: add keys as new stateful features arrive; do not
-    add columns to existing tables for one-off state.
-    """
-
-    __tablename__ = "bot_state"
-
-    key: str = Field(primary_key=True, max_length=100)
-    value: str = Field(default="", max_length=2000)
-    updated_at: datetime.datetime = Field(
-        default_factory=lambda: datetime.datetime.now(datetime.UTC)
+    id: str = Field(primary_key=True, max_length=64)
+    chat_id: int = Field(sa_column=sa.Column(sa.BigInteger, nullable=False, index=True))
+    agent_run_id: str | None = Field(default=None, foreign_key="v2_agent_runs.id", index=True)
+    action: str = Field(max_length=80)
+    payload_json: str = Field(max_length=12000)
+    summary: str = Field(max_length=2000)
+    status: ApprovalStatus = Field(
+        default=ApprovalStatus.PENDING,
+        sa_column=sa.Column(sa.String(20), nullable=False, index=True),
     )
+    approval_message_id: int | None = Field(
+        default=None, sa_column=sa.Column(sa.BigInteger, nullable=True, index=True)
+    )
+    expires_at: dt.datetime = Field(
+        default_factory=lambda: utcnow() + dt.timedelta(hours=24), index=True
+    )
+    created_at: dt.datetime = Field(default_factory=utcnow)
+    resolved_at: dt.datetime | None = Field(default=None)

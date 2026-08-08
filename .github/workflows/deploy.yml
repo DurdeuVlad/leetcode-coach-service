@@ -13,7 +13,39 @@ jobs:
     name: Trigger Coolify Auto-Deploy
     runs-on: self-hosted
     steps:
-      - name: Trigger Coolify Deployment
+      - name: Trigger Coolify Deployment and verify it finishes
+        # Prior version only checked that the `docker exec` command itself
+        # exited 0 — that's true whenever the trigger call succeeds, even if
+        # Coolify's actual build/deploy then fails or times out. This job
+        # reported green every time (see `gh run list --workflow=deploy.yml`)
+        # while production silently ran a stale SHA (issue #69). This polls
+        # Coolify's own deployment-queue row by UUID and fails the workflow
+        # if it doesn't reach `finished`.
+        #
+        # NOTE: `status` value names (`finished`/`failed`) match Coolify's
+        # ApplicationDeploymentQueue model as of the version this repo has
+        # been deployed with. If Coolify was upgraded and renamed these,
+        # this step will just time out instead of detecting `failed` early —
+        # check the printed status log if that happens.
         run: |
-          echo "Triggering Coolify deployment for commit ${{ github.sha }}..."
-          docker exec coolify php artisan tinker --execute="\$app = App\Models\Application::find(1); queue_application_deployment(application: \$app, deployment_uuid: (string)Illuminate\Support\Str::uuid(), commit: '${{ github.sha }}');"
+          set -euo pipefail
+          DEPLOYMENT_UUID=$(cat /proc/sys/kernel/random/uuid)
+          echo "Triggering Coolify deployment for commit ${{ github.sha }} (uuid=$DEPLOYMENT_UUID)..."
+          docker exec coolify php artisan tinker --execute="\$app = App\Models\Application::find(1); queue_application_deployment(application: \$app, deployment_uuid: '$DEPLOYMENT_UUID', commit: '${{ github.sha }}');"
+
+          echo "Polling deployment status for up to 10 minutes..."
+          for i in $(seq 1 60); do
+            sleep 10
+            STATUS=$(docker exec coolify php artisan tinker --execute="echo optional(App\Models\ApplicationDeploymentQueue::where('deployment_uuid', '$DEPLOYMENT_UUID')->first())->status;" 2>/dev/null | tr -d '\r\n' | tail -c 64)
+            echo "  [$i/60] status=${STATUS:-unknown}"
+            if [ "$STATUS" = "finished" ]; then
+              echo "Coolify deployment finished for commit ${{ github.sha }}."
+              exit 0
+            fi
+            if [ "$STATUS" = "failed" ] || [ "$STATUS" = "cancelled-by-user" ]; then
+              echo "::error::Coolify deployment $STATUS for commit ${{ github.sha }} (uuid=$DEPLOYMENT_UUID). Check the Coolify UI deployment log."
+              exit 1
+            fi
+          done
+          echo "::error::Timed out after 10 minutes waiting for Coolify deployment $DEPLOYMENT_UUID to finish. It may still be running — check the Coolify UI."
+          exit 1

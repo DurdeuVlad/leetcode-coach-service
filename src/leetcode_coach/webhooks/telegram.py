@@ -38,7 +38,7 @@ from telegram import Update
 from leetcode_coach.config import get_settings
 from leetcode_coach.db.base import get_session
 from leetcode_coach.db.models import ProcessedUpdate, ProcessedUpdateStatus
-from leetcode_coach.errors import send_alert
+from leetcode_coach.errors import describe_exception, send_alert
 
 log = structlog.get_logger("webhook")
 
@@ -152,7 +152,7 @@ async def telegram_webhook(
         except Exception as e:
             _mark_update(update.update_id, ProcessedUpdateStatus.FAILED, str(e))
             log.error("webhook_callback_failed", error=str(e), update_id=update.update_id)
-            await send_alert(f"Telegram callback dispatch failed: {e!r}")
+            await send_alert(f"Telegram callback dispatch failed: {describe_exception(e)}")
         return Response(status_code=200)
 
     # 6. Dispatch text updates to flow_b. Import here to avoid a circular import at module
@@ -168,7 +168,7 @@ async def telegram_webhook(
         # Layer 3 (errors.py): alert the operator, but still 200 so Telegram
         # doesn't retry and re-trigger duplicate processing.
         log.error("webhook_handle_failed", error=str(e), update_id=update.update_id)
-        await send_alert(f"Flow B handle_update failed: {e!r}")
+        await send_alert(f"Flow B handle_update failed: {describe_exception(e)}")
     return Response(status_code=200)
 
 

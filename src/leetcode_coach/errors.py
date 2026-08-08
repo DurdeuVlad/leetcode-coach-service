@@ -62,6 +62,21 @@ class YouTubeDisabled(LeetCodeCoachError):
     """
 
 
+def describe_exception(exc: Exception) -> str:
+    """Short, chat-safe description of an exception for alerts (#070).
+
+    ``send_alert`` posts to the same chat the user is coaching in (this is a
+    single-user bot, so operator == user by design — the alert itself is not
+    the leak). The leak was formatting: ``f"{e!r}"`` dumps a raw Python
+    ``repr()`` — nested quotes, parens, and sometimes multi-line tracebacks —
+    into the middle of a coaching conversation. This gives the same
+    information (exception type + message) without the repr noise. Full
+    detail (``exc_info=True``) still goes to structured logs at each call
+    site; this function is only for the chat-facing string.
+    """
+    return f"{type(exc).__name__}: {exc}"
+
+
 async def send_alert(message: str) -> None:
     """Send one Telegram alert to the configured chat.
 

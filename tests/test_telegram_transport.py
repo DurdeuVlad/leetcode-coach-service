@@ -121,3 +121,58 @@ async def test_transient_telegram_failure_retries_three_times(staging_settings) 
         await telegram.send_message(staging_settings.telegram_chat_id, "retry me")
 
     assert route.call_count == 3
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_set_message_reaction_heart(staging_settings) -> None:
+    route = respx.post("https://api.telegram.org/botstaging-token/setMessageReaction").mock(
+        return_value=httpx.Response(200, json={"ok": True, "result": True})
+    )
+
+    await telegram.set_message_reaction(staging_settings.telegram_chat_id, 42, emoji="\u2764\ufe0f")
+
+    assert route.call_count == 1
+    body = route.calls[0].request.content
+    assert b'"message_id":42' in body
+    assert b'"reaction":[{"type":"emoji","emoji":"\xe2\x9d\xa4' in body
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_set_message_reaction_x(staging_settings) -> None:
+    route = respx.post("https://api.telegram.org/botstaging-token/setMessageReaction").mock(
+        return_value=httpx.Response(200, json={"ok": True, "result": True})
+    )
+
+    await telegram.set_message_reaction(staging_settings.telegram_chat_id, 99, emoji="\u274c")
+
+    assert route.call_count == 1
+    body = route.calls[0].request.content
+    assert b'"message_id":99' in body
+    assert b'"reaction":[{"type":"emoji","emoji":"\xe2\x9d\x8c' in body
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_set_message_reaction_clears_with_empty_emoji(staging_settings) -> None:
+    route = respx.post("https://api.telegram.org/botstaging-token/setMessageReaction").mock(
+        return_value=httpx.Response(200, json={"ok": True, "result": True})
+    )
+
+    await telegram.set_message_reaction(staging_settings.telegram_chat_id, 7, emoji="")
+
+    assert route.call_count == 1
+    body = route.calls[0].request.content
+    assert b'"reaction":[]' in body
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_set_message_reaction_rejects_non_allowlisted_chat(staging_settings) -> None:
+    respx.post("https://api.telegram.org/botstaging-token/setMessageReaction").mock(
+        return_value=httpx.Response(200, json={"ok": True, "result": True})
+    )
+
+    with pytest.raises(telegram.TelegramV2Error, match="not allowlisted"):
+        await telegram.set_message_reaction("999", 1, emoji="\u2764\ufe0f")

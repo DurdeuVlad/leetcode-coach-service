@@ -165,3 +165,22 @@ async def answer_callback(callback_id: str, text: str | None = None) -> None:
     if text:
         payload["text"] = text[:200]
     await _call("answerCallbackQuery", payload)
+
+
+async def set_message_reaction(
+    chat_id: str | int,
+    message_id: int,
+    *,
+    emoji: str,
+    is_big: bool = False,
+) -> None:
+    """Set an emoji reaction on a message. Pass emoji="" to clear reactions."""
+    reaction: list[dict[str, str]] = [{"type": "emoji", "emoji": emoji}] if emoji else []
+    payload: dict[str, Any] = {
+        "chat_id": _assert_chat(chat_id),
+        "message_id": message_id,
+        "reaction": reaction,
+    }
+    if is_big:
+        payload["is_big"] = True
+    await _call("setMessageReaction", payload)

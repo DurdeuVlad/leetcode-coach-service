@@ -47,6 +47,9 @@ Thumbs.db
 .local-*.db
 ANTIGRAVITY_DEPLOY_PROMPT.md
 ANTIGRAVITY_DIAGNOSE_PROMPT.md
+DEPLOYMENT_DEBUG_PROMPT.md
+.git-commit-msg.txt
+.pr-body.md
 
 # promptfoo — local-only prompt evals, never in CI (burns credits)
 # Config IS committed (promptfoo/), but caches/results are local.

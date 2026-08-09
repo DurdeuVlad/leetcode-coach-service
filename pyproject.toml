@@ -38,7 +38,7 @@ coach-prove-telegram = "leetcode_coach.scripts.prove_telegram_transport:main"
 dev = [
     "pytest>=8.3.0,<9",
     "pytest-asyncio>=0.24.0,<0.25",
-    "respx>=0.22.0,<0.23",
+    "respx>=0.23.1,<0.24",
     "testcontainers[postgres]>=4.8.0,<5",
     "ruff>=0.7.0,<0.8",
 ]

@@ -24,6 +24,7 @@ log = structlog.get_logger("v2.leetcode")
 
 _RECENT = """query recentAcSubmissions($username:String!,$limit:Int!){recentAcSubmissionList(username:$username,limit:$limit){title titleSlug}}"""
 _META = """query problemsetQuestionList($filters:QuestionListFilterInput){problemsetQuestionList:questionList(categorySlug:"",limit:10,skip:0,filters:$filters){questions:data{difficulty title titleSlug topicTags{name slug}}}}"""
+_PROBLEMSET = """query problemsetQuestionList($filters:QuestionListFilterInput,$limit:Int!,$skip:Int!){problemsetQuestionList:questionList(categorySlug:"",limit:$limit,skip:$skip,filters:$filters){questions:data{difficulty title titleSlug topicTags{name slug}}}}"""
 
 # Puppeteer code executed by Browserless's /chrome/function endpoint. It
 # loads leetcode.com (getting past Cloudflare with a real Chrome), then
@@ -148,4 +149,47 @@ async def fetch_recent_solved(limit: int = 20) -> list[ProblemRecord]:
                 tags=",".join(str(tag["slug"]) for tag in exact.get("topicTags", [])),
             )
         )
+    return records
+
+
+async def fetch_problemset(
+    *,
+    difficulties: tuple[str, ...] = ("medium", "hard"),
+    per_difficulty_limit: int = 100,
+    page_size: int = 50,
+) -> list[ProblemRecord]:
+    """Fetch unsolved canonical problems from LeetCode's problemset via Browserless.
+
+    Paginates through ``problemsetQuestionList`` for each requested difficulty,
+    returning ``ProblemRecord`` rows with exact-slug canonical metadata. Used to
+    populate the unsolved pool that Terra proposes from.
+    """
+    records: list[ProblemRecord] = []
+    for difficulty in difficulties:
+        fetched = 0
+        skip = 0
+        while fetched < per_difficulty_limit:
+            limit = min(page_size, per_difficulty_limit - fetched)
+            payload = await _post(
+                _PROBLEMSET,
+                {"filters": {"difficulty": difficulty.upper()}, "limit": limit, "skip": skip},
+            )
+            questions = (
+                payload.get("data", {}).get("problemsetQuestionList", {}).get("questions", [])
+            )
+            if not questions:
+                break
+            for row in questions:
+                records.append(
+                    ProblemRecord(
+                        slug=str(row["titleSlug"]),
+                        title=str(row["title"]),
+                        difficulty=str(row["difficulty"]).lower(),
+                        tags=",".join(str(tag["slug"]) for tag in row.get("topicTags", [])),
+                    )
+                )
+            fetched += len(questions)
+            if len(questions) < limit:
+                break
+            skip += limit
     return records

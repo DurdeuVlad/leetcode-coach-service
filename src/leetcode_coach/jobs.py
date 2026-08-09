@@ -21,7 +21,7 @@ from leetcode_coach.db.models import (
     utcnow,
 )
 from leetcode_coach.domain.services import CoachDomain
-from leetcode_coach.integrations.leetcode import fetch_recent_solved
+from leetcode_coach.integrations.leetcode import fetch_problemset, fetch_recent_solved
 from leetcode_coach.integrations.telegram import edit_message, send_message
 
 settings = get_settings()
@@ -124,9 +124,28 @@ async def expire_state() -> None:
 
 
 async def refresh_problem_pool() -> None:
-    records = await fetch_recent_solved()
+    # 1. Populate the unsolved pool with canonical medium+hard problems from LeetCode.
+    pool_records = await fetch_problemset()
+    # 2. Mark recently-solved problems as solved in the pool.
+    solved_records = await fetch_recent_solved()
     with Session(engine) as session:
-        for record in records:
+        for record in pool_records:
+            problem = session.get(V2Problem, record.slug)
+            if problem is None:
+                problem = V2Problem(
+                    slug=record.slug,
+                    title=record.title,
+                    url=f"https://leetcode.com/problems/{record.slug}/",
+                    difficulty=record.difficulty,
+                    tags=record.tags,
+                )
+                session.add(problem)
+            else:
+                problem.title = record.title
+                problem.url = f"https://leetcode.com/problems/{record.slug}/"
+                problem.difficulty = record.difficulty
+                problem.tags = record.tags
+        for record in solved_records:
             problem = session.get(V2Problem, record.slug)
             if problem is None:
                 problem = V2Problem(

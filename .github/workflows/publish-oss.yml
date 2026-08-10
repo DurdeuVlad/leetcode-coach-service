@@ -1,0 +1,52 @@
+name: Publish as open source
+
+# Manual-only. This flips the repo public and locks down branch protection
+# on master — a one-way action. Requires typing "PUBLISH" in the dispatch
+# input as a deliberate confirmation, not just a tap. Only collaborators
+# with write access can even see/trigger this in the Actions UI.
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type PUBLISH (all caps) to confirm you want to make this repo public now'
+        required: true
+        type: string
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require explicit confirmation
+        if: ${{ inputs.confirm != 'PUBLISH' }}
+        run: |
+          echo "::error::Confirmation text did not match 'PUBLISH'. Nothing was changed. Re-run and type PUBLISH exactly if you meant to do this."
+          exit 1
+
+      - name: Protect master branch
+        env:
+          GH_TOKEN: ${{ secrets.OSS_ADMIN_TOKEN }}
+        run: |
+          gh api -X PUT repos/${{ github.repository }}/branches/master/protection \
+            -f required_pull_request_reviews.required_approving_review_count=0 \
+            -F enforce_admins=true \
+            -F required_status_checks=null \
+            -F restrictions=null
+
+      - name: Lock default workflow permissions to read-only
+        env:
+          GH_TOKEN: ${{ secrets.OSS_ADMIN_TOKEN }}
+        run: |
+          gh api -X PATCH repos/${{ github.repository }}/actions/permissions/workflow \
+            -f default_workflow_permissions=read
+
+      - name: Make repository public
+        env:
+          GH_TOKEN: ${{ secrets.OSS_ADMIN_TOKEN }}
+        run: |
+          gh api -X PATCH repos/${{ github.repository }} -F private=false
+
+      - name: Confirm result
+        env:
+          GH_TOKEN: ${{ secrets.OSS_ADMIN_TOKEN }}
+        run: |
+          gh api repos/${{ github.repository }} --jq '"Repo is now: " + (if .private then "PRIVATE (something went wrong)" else "PUBLIC" end)'

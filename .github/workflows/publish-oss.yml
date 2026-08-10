@@ -1,0 +1,128 @@
+name: Publish OSS (go public)
+
+# One-shot, manual, maintainer-only flip from private -> public.
+#
+# This is NOT part of the normal CI/CD path. It exists so that going public
+# is a single deliberate, informed action taken by the maintainer — not
+# something that can be triggered by a PR, a push, a cron, or any automated
+# agent. It requires:
+#   1. A human manually running this workflow from the Actions tab
+#      (workflow_dispatch only — no other trigger is defined).
+#   2. Typing the exact confirmation phrase below as an input. Anything
+#      else aborts before any API call is made.
+#   3. A `PUBLISH_OSS_TOKEN` repo secret — a PAT (or fine-grained token)
+#      scoped to *this* repository with admin rights (repo visibility,
+#      branch protection, Actions settings). This secret does not exist
+#      until the maintainer adds it themselves; without it this workflow
+#      can only fail, never act.
+#
+# What it does, in order, only after the confirmation check passes:
+#   - Sets branch protection on `master` (require PR review, no force-push,
+#     no direct pushes) so the release branch stays protected once public.
+#   - Restricts Actions permissions to first-party workflows only, so
+#     forks/external PRs can't run arbitrary workflows against repo secrets.
+#   - Flips repository visibility to public.
+#
+# Read-only agents (including the oss-tracker scout) must never trigger,
+# approve, or add the secret for this workflow — that authorization is
+# Vlad's alone.
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: >-
+          Type exactly: PUBLISH leetcode-coach-service
+          (anything else aborts the run before any change is made)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  guard:
+    name: Verify confirmation phrase
+    runs-on: ubuntu-latest
+    outputs:
+      confirmed: ${{ steps.check.outputs.confirmed }}
+    steps:
+      - name: Check confirmation phrase
+        id: check
+        run: |
+          set -euo pipefail
+          expected="PUBLISH leetcode-coach-service"
+          actual="${{ github.event.inputs.confirm }}"
+          if [ "$actual" != "$expected" ]; then
+            echo "::error::Confirmation phrase did not match exactly. Nothing was changed."
+            exit 1
+          fi
+          echo "confirmed=true" >> "$GITHUB_OUTPUT"
+
+  publish:
+    name: Flip branch protection, Actions permissions, and visibility
+    needs: guard
+    if: needs.guard.outputs.confirmed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Require PUBLISH_OSS_TOKEN secret
+        run: |
+          if [ -z "${{ secrets.PUBLISH_OSS_TOKEN }}" ]; then
+            echo "::error::PUBLISH_OSS_TOKEN secret is not set. Add a repo-scoped admin PAT as a secret named PUBLISH_OSS_TOKEN before running this workflow. Aborting — no changes were made."
+            exit 1
+          fi
+
+      - name: Protect master branch
+        env:
+          GH_TOKEN: ${{ secrets.PUBLISH_OSS_TOKEN }}
+        run: |
+          set -euo pipefail
+          curl -sS -X PUT \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/branches/master/protection" \
+            -d '{
+              "required_status_checks": {"strict": true, "contexts": ["lint-and-test"]},
+              "enforce_admins": true,
+              "required_pull_request_reviews": {"required_approving_review_count": 1},
+              "restrictions": null,
+              "allow_force_pushes": false,
+              "allow_deletions": false
+            }'
+
+      - name: Restrict Actions to first-party workflows only
+        env:
+          GH_TOKEN: ${{ secrets.PUBLISH_OSS_TOKEN }}
+        run: |
+          set -euo pipefail
+          curl -sS -X PUT \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/permissions" \
+            -d '{
+              "enabled": true,
+              "allowed_actions": "selected"
+            }'
+          curl -sS -X PUT \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/permissions/workflow" \
+            -d '{
+              "default_workflow_permissions": "read",
+              "can_approve_pull_request_reviews": false
+            }'
+
+      - name: Flip repository visibility to public
+        env:
+          GH_TOKEN: ${{ secrets.PUBLISH_OSS_TOKEN }}
+        run: |
+          set -euo pipefail
+          curl -sS -X PATCH \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}" \
+            -d '{"private": false}'
+
+          echo "::notice::Repository visibility flipped to public. Update oss-tracker's candidates/leetcode-coach-service.md status to 'done' once verified."

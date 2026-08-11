@@ -9,7 +9,7 @@ with an in-process transcript. The suite has passed against both the disposable
 SQLite database and PostgreSQL 16.14 in an isolated local Podman container.
 
 ```powershell
-$env:DATABASE_URL = 'sqlite:///./leetcode-coach-service/.local-live-proof.db'
+$env:DATABASE_URL = 'sqlite:///./.local-live-proof.db'
 $env:PROOF_DATABASE_URL = $env:DATABASE_URL
 uv run alembic upgrade head
 uv run coach-prove
@@ -55,7 +55,7 @@ responses, pending-approval serialization, superseded alias expiry, harmless
 stale callbacks, bounded read-tool projections, and unbounded opaque SDK state storage.
 The real PostgreSQL run verified
 all Telegram identifiers as `BIGINT`/`BIGSERIAL`, including the configured
-REDACTED_CHAT_ID chat ID, opaque run state as `TEXT`, and zero leaked advisory
+chat ID, opaque run state as `TEXT`, and zero leaked advisory
 locks after cross-engine webhook retries. A two-engine scheduler-leader test
 also proved only one process can hold the scheduler lock and that disposal
 releases it. A real Uvicorn process also

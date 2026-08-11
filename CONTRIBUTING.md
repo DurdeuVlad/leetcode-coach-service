@@ -78,7 +78,7 @@ with real integration secrets (Telegram, OpenAI, Google refresh token).
 Auto-deploying every merged PR would let any external contributor's code
 run on the homelab with those secrets. The `dev`/`master` split makes the
 maintainer's merge-to-master the deliberate, reviewed deploy decision.
-See `plan/issues/033-cicd-coolify-tailscale.md` for the full rationale.
+See [`docs/live-proof.md`](docs/live-proof.md) and [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml) for how the deploy trigger currently works.
 
 ## Before you open a PR
 

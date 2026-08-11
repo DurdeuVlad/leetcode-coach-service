@@ -11,7 +11,7 @@ from leetcode_coach.integrations import telegram
 def staging_settings(monkeypatch):
     settings = SimpleNamespace(
         telegram_bot_token="staging-token",
-        telegram_chat_id="REDACTED_TELEGRAM_CHAT_ID",
+        telegram_chat_id="123456789",
         telegram_webhook_secret="staging-secret",
     )
     monkeypatch.setattr(telegram, "get_settings", lambda: settings)

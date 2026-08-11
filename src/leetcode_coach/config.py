@@ -24,7 +24,9 @@ class V2Settings(BaseSettings):
     telegram_bot_token: str = Field(...)
     telegram_chat_id: str = Field(...)
     telegram_webhook_url: str = ""
-    telegram_webhook_secret: str = ""
+    telegram_webhook_secret: str = Field(
+        ..., description="Required: rejects forged webhook posts that only guess telegram_chat_id"
+    )
 
     openai_api_key: str = Field(...)
     terra_model: str = "gpt-5.6-terra"

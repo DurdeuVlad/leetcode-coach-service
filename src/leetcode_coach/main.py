@@ -72,11 +72,8 @@ async def telegram_webhook(
         default=None, alias="X-Telegram-Bot-Api-Secret-Token"
     ),
 ) -> Response:
-    if settings.telegram_webhook_secret and (
-        x_telegram_bot_api_secret_token is None
-        or not secrets.compare_digest(
-            x_telegram_bot_api_secret_token, settings.telegram_webhook_secret
-        )
+    if x_telegram_bot_api_secret_token is None or not secrets.compare_digest(
+        x_telegram_bot_api_secret_token, settings.telegram_webhook_secret
     ):
         return Response(status_code=200)
     try:

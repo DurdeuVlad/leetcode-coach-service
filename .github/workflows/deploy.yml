@@ -12,6 +12,7 @@ jobs:
   deploy:
     name: Trigger Coolify Auto-Deploy
     runs-on: self-hosted
+    environment: production
     steps:
       - name: Trigger Coolify Deployment and verify it finishes
         # Prior version only checked that the `docker exec` command itself

@@ -53,6 +53,12 @@ secret-token constraints, visible hard failures, and three-attempt transient ret
 Crash-recovery regressions also verify the update claim lease, in-flight 503
 responses, pending-approval serialization, superseded alias expiry, harmless
 stale callbacks, bounded read-tool projections, and unbounded opaque SDK state storage.
+Automated receipt regressions added on 2026-08-15 verify queue-less solved work,
+reviewed open-queue work, replay after an unrelated balance change, out-of-band
+receipt propagation, receipt-before-coaching delivery, and two-attempt ordering.
+Replay output is explicitly `Already recorded` with `+0.00` and an unchanged
+current balance. These cases passed in the local automated suite; the real-model
+`coach-prove` harness has not yet been rerun for this receipt-only change.
 The real PostgreSQL run verified
 all Telegram identifiers as `BIGINT`/`BIGSERIAL`, including the configured
 chat ID, opaque run state as `TEXT`, and zero leaked advisory

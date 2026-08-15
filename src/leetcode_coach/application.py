@@ -40,6 +40,7 @@ from leetcode_coach.rendering import (
     approval_keyboard,
     proposal_keyboard,
     render_proposal_html,
+    render_work_receipt,
 )
 from leetcode_coach.runtime.adapters import (
     PostgresAgentSession,
@@ -286,6 +287,12 @@ class CoachApplication:
                 chat_id, rows, reply_to_message_id=reply_to_message_id
             )
             return
+        for receipt in outcome.receipts:
+            await send_message(
+                chat_id,
+                render_work_receipt(receipt),
+                reply_to_message_id=reply_to_message_id,
+            )
         await self._send_unsent_proposal(chat_id)
         await self._send_unsent_reviews(chat_id)
         if outcome.text:

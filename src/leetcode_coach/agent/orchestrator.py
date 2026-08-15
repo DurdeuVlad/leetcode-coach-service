@@ -51,6 +51,8 @@ ask_sol_advisor once and keep Terra in control of the final response.
 Never simulate, narrate, or manually request approval in plain text. When a user
 requests an ordinary coaching action, call the matching write tool immediately. Do
 not tell the user to reply "approve", "confirm", or similar text.
+Final text is coaching only. Deterministic receipts are delivered separately, so do
+not repeat receipt title, result, credit, balance, path, or replay status.
 """
 
 
@@ -179,6 +181,7 @@ class AgentRuntimeContext:
     write_started: bool = False
     approval_pending: bool = False
     operation_key: str | None = None
+    receipts: list[dict[str, Any]] = field(default_factory=list)
 
     async def read(self, operation: Callable[[], Awaitable[Any]]) -> Any:
         async with self.read_limiter:
@@ -202,6 +205,7 @@ class AgentRunOutcome:
     approvals: list[PendingApproval]
     metrics: dict[str, Any]
     run_id: str | None = None
+    receipts: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _tool_arguments(interruption: Any) -> dict[str, Any]:
@@ -377,7 +381,7 @@ def create_terra_agent(settings: AgentSettings | None = None) -> Any:
         """
         if ctx.context.operation_key is None:
             raise RuntimeError("attempt requires a Telegram message operation key")
-        return await ctx.context.write(
+        result = await ctx.context.write(
             lambda: ctx.context.domain.commit_attempt(
                 chat_id=ctx.context.chat_id,
                 review_id=review_id,
@@ -387,6 +391,10 @@ def create_terra_agent(settings: AgentSettings | None = None) -> Any:
                 operation_key=ctx.context.operation_key,
             )
         )
+        receipt = result.get("receipt")
+        if isinstance(receipt, dict):
+            ctx.context.receipts.append(receipt)
+        return {key: value for key, value in result.items() if key != "receipt"}
 
     async def commit_canonical_attempt(
         ctx: RunContextWrapper[AgentRuntimeContext],
@@ -398,7 +406,7 @@ def create_terra_agent(settings: AgentSettings | None = None) -> Any:
         """Persist verified work for an exact canonical problem immediately."""
         if ctx.context.operation_key is None:
             raise RuntimeError("canonical attempt requires a Telegram message operation key")
-        return await ctx.context.write(
+        result = await ctx.context.write(
             lambda: ctx.context.domain.commit_canonical_attempt(
                 chat_id=ctx.context.chat_id,
                 problem_slug=problem_slug,
@@ -408,6 +416,10 @@ def create_terra_agent(settings: AgentSettings | None = None) -> Any:
                 operation_key=ctx.context.operation_key,
             )
         )
+        receipt = result.get("receipt")
+        if isinstance(receipt, dict):
+            ctx.context.receipts.append(receipt)
+        return {key: value for key, value in result.items() if key != "receipt"}
 
     async def skip_problem(
         ctx: RunContextWrapper[AgentRuntimeContext], review_id: str
@@ -673,9 +685,14 @@ class TerraCoachRunner:
                 approvals,
                 context.metrics.to_dict(),
                 run_id=stored.run_id,
+                receipts=list(context.receipts),
             )
         context.metrics.finish()
         final = getattr(result, "final_output", None)
         return AgentRunOutcome(
-            "completed", str(final) if final is not None else "", [], context.metrics.to_dict()
+            "completed",
+            str(final) if final is not None else "",
+            [],
+            context.metrics.to_dict(),
+            receipts=list(context.receipts),
         )

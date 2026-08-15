@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-08-15 — Gated production delivery
+
+- Reuse the full CI workflow as a required deploy prerequisite for every `master` release.
+- Keep direct CI triggers on `dev` while removing the independent, unordered `master` CI run.
+- Add a high-safety production verification prompt with evidence-gated CI/CD-only repairs.
+
 ## 2026-08-15 — Deterministic work receipts
 
 - Send a database-authoritative receipt for every recorded or replayed attempt before coaching.

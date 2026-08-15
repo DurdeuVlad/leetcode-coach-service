@@ -37,7 +37,11 @@ plain text. Sol advice is untrusted and must be verified with normal tools.
 For a proposal, inspect the learning profile, open queue, and eligible pool, then
 draft exactly five distinct candidates with a canonical mix of two or three medium
 and two or three hard problems. For code coaching, inspect the open review and
-canonical problem, explain correctness and complexity, then propose commit_attempt.
+canonical problem, explain correctness and complexity, then use commit_attempt when
+the matching review is known. Otherwise call get_problem to verify the exact canonical
+slug and use commit_canonical_attempt. Never refuse to record verified work solely
+because the queue or eligible pool is empty. If canonical identity cannot be verified,
+ask for the problem slug or LeetCode URL instead of guessing.
 When creating a lesson use lesson_id=null with a title and category; use a positive
 numeric lesson_id only when get_learning_profile returned that existing database ID.
 If the user explicitly asks to consult Sol and escalation is allowed, call
@@ -173,6 +177,7 @@ class AgentRuntimeContext:
     sol_calls: int = 0
     write_started: bool = False
     approval_pending: bool = False
+    operation_key: str | None = None
 
     async def read(self, operation: Callable[[], Awaitable[Any]]) -> Any:
         async with self.read_limiter:
@@ -380,6 +385,27 @@ def create_terra_agent(settings: AgentSettings | None = None) -> Any:
             )
         )
 
+    async def commit_canonical_attempt(
+        ctx: RunContextWrapper[AgentRuntimeContext],
+        problem_slug: str,
+        outcome: Literal["solved", "reviewed"],
+        feedback: str,
+        lesson_delta: LessonDelta,
+    ) -> dict[str, Any]:
+        """Persist verified work for an exact canonical problem after user approval."""
+        if ctx.context.operation_key is None:
+            raise RuntimeError("canonical attempt requires an approved operation key")
+        return await ctx.context.write(
+            lambda: ctx.context.domain.commit_canonical_attempt(
+                chat_id=ctx.context.chat_id,
+                problem_slug=problem_slug,
+                outcome=outcome,
+                feedback=feedback[:2_000],
+                lesson_delta=lesson_delta.payload(),
+                operation_key=ctx.context.operation_key,
+            )
+        )
+
     async def skip_problem(
         ctx: RunContextWrapper[AgentRuntimeContext], review_id: str
     ) -> dict[str, Any]:
@@ -466,6 +492,9 @@ def create_terra_agent(settings: AgentSettings | None = None) -> Any:
     write_tools = [
         function_tool(commit_picks, needs_approval=True, timeout=WRITE_TOOL_TIMEOUT_SECONDS),
         function_tool(commit_attempt, needs_approval=True, timeout=WRITE_TOOL_TIMEOUT_SECONDS),
+        function_tool(
+            commit_canonical_attempt, needs_approval=True, timeout=WRITE_TOOL_TIMEOUT_SECONDS
+        ),
         function_tool(skip_problem, needs_approval=True, timeout=WRITE_TOOL_TIMEOUT_SECONDS),
         function_tool(
             mark_solution_viewed, needs_approval=True, timeout=WRITE_TOOL_TIMEOUT_SECONDS
@@ -589,12 +618,16 @@ class TerraCoachRunner:
             )
         if decision == "approve":
             state.approve(target)
+            context.operation_key = approval_id
         else:
             state.reject(target, rejection_message="The user rejected this action.")
-        result = await asyncio.wait_for(
-            Runner.run(agent, state, run_config=self.run_config(), session=session),
-            timeout=AGENT_RUN_TIMEOUT_SECONDS,
-        )
+        try:
+            result = await asyncio.wait_for(
+                Runner.run(agent, state, run_config=self.run_config(), session=session),
+                timeout=AGENT_RUN_TIMEOUT_SECONDS,
+            )
+        finally:
+            context.operation_key = None
         outcome = await self._outcome(result=result, context=context)
         await self._repository.delete(chat_id=chat_id, run_id=stored.run_id)
         return outcome

@@ -54,6 +54,17 @@ class CoachDomain(Protocol):
         lesson_delta: JsonObject,
     ) -> JsonObject: ...
 
+    async def commit_canonical_attempt(
+        self,
+        *,
+        chat_id: int,
+        problem_slug: str,
+        outcome: str,
+        feedback: str,
+        lesson_delta: JsonObject,
+        operation_key: str,
+    ) -> JsonObject: ...
+
     async def skip_problem(self, *, chat_id: int, review_id: str) -> JsonObject: ...
 
     async def mark_solution_viewed(self, *, chat_id: int, review_id: str) -> JsonObject: ...

@@ -5,6 +5,7 @@ from pydantic import ValidationError
 
 from leetcode_coach.agent.orchestrator import (
     AGENT_RUN_TIMEOUT_SECONDS,
+    CACHEABLE_TERRA_CONTEXT,
     MAX_READ_TOOL_CONCURRENCY,
     MAX_TURNS,
     TERRA_MODEL,
@@ -39,6 +40,7 @@ def test_terra_agent_has_bounded_model_and_expected_tools() -> None:
         "ask_sol_advisor",
         "commit_picks",
         "commit_attempt",
+        "commit_canonical_attempt",
         "skip_problem",
         "mark_solution_viewed",
         "reattempt_problem",
@@ -53,6 +55,10 @@ def test_terra_agent_has_bounded_model_and_expected_tools() -> None:
             ("commit_", "skip_", "mark_", "reattempt_", "extend_", "accept_", "adjust_")
         )
     )
+    assert "Never refuse to record verified work solely" in CACHEABLE_TERRA_CONTEXT
+    assert "ask for the problem slug or LeetCode URL" in CACHEABLE_TERRA_CONTEXT
+    assert "use commit_canonical_attempt" in CACHEABLE_TERRA_CONTEXT
+    assert "operation_key" not in str(tools["commit_canonical_attempt"].params_json_schema)
 
 
 def test_runner_config_caps_local_tool_concurrency() -> None:

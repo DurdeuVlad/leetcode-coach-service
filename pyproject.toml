@@ -12,7 +12,7 @@ authors = [{ name = "Vlad" }]
 dependencies = [
     "fastapi>=0.115.0,<0.116",
     "uvicorn[standard]>=0.32.0,<0.33",
-    "apscheduler>=3.10.4,<3.11",
+    "apscheduler>=3.11.3,<3.12",
     "python-telegram-bot>=21.6,<22",
     "openai>=2.45.0,<3",
     "openai-agents>=0.19.2,<0.20",

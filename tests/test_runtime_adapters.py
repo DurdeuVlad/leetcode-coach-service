@@ -48,6 +48,17 @@ def _problem(slug: str, difficulty: str) -> V2Problem:
     )
 
 
+def test_application_context_uses_initial_telegram_message_as_operation_key() -> None:
+    application = CoachApplication.__new__(CoachApplication)
+    application.domain = object()
+    application.advisor = object()
+
+    context = application._context(7, operation_key="telegram-message-91")
+
+    assert context.chat_id == 7
+    assert context.operation_key == "telegram-message-91"
+
+
 @pytest.mark.asyncio
 async def test_draft_uses_canonical_difficulty_for_house_robber(v2_engine):
     with Session(v2_engine) as session:
@@ -165,6 +176,103 @@ async def test_empty_queue_canonical_attempt_adapter_replay_is_a_no_op(v2_engine
 
 
 @pytest.mark.asyncio
+async def test_get_problem_read_through_caches_only_exact_server_metadata(v2_engine, monkeypatch):
+    calls = []
+
+    async def fake_fetch(value):
+        calls.append(value)
+        from leetcode_coach.integrations.leetcode import ProblemRecord
+
+        return ProblemRecord("coin-change", "Coin Change", "medium", "dynamic-programming")
+
+    monkeypatch.setattr("leetcode_coach.runtime.adapters.fetch_exact_problem", fake_fetch)
+    adapter = SQLCoachDomainAdapter(v2_engine)
+
+    first = await adapter.get_problem(
+        chat_id=1, slug="https://leetcode.com/problems/coin-change/description/"
+    )
+    second = await adapter.get_problem(chat_id=1, slug="coin-change")
+
+    assert first == second
+    assert first["url"] == "https://leetcode.com/problems/coin-change/"
+    assert first["solved"] is False
+    assert first["eligible"] is False
+    assert calls == ["https://leetcode.com/problems/coin-change/description/"]
+    assert await adapter.search_problem_pool(chat_id=1, filters={}, limit=20) == []
+
+
+@pytest.mark.asyncio
+async def test_get_problem_recovers_when_concurrent_insert_wins(v2_engine, monkeypatch):
+    from sqlalchemy.exc import IntegrityError
+
+    async def fake_fetch(value):
+        del value
+        from leetcode_coach.integrations.leetcode import ProblemRecord
+
+        return ProblemRecord("coin-change", "Coin Change", "medium", "dp")
+
+    adapter = SQLCoachDomainAdapter(v2_engine)
+    original_write = adapter._write
+
+    async def race_write(operation):
+        del operation
+        with Session(v2_engine) as session:
+            problem = _problem("coin-change", "medium")
+            problem.eligible = False
+            session.add(problem)
+            session.commit()
+        raise IntegrityError("concurrent canonical cache insert", {}, Exception("unique"))
+
+    monkeypatch.setattr("leetcode_coach.runtime.adapters.fetch_exact_problem", fake_fetch)
+    monkeypatch.setattr(adapter, "_write", race_write)
+
+    result = await adapter.get_problem(chat_id=1, slug="coin-change")
+
+    assert result["slug"] == "coin-change"
+    assert result["eligible"] is False
+    monkeypatch.setattr(adapter, "_write", original_write)
+
+
+@pytest.mark.asyncio
+async def test_direct_attempt_replay_uses_message_and_problem_identity(v2_engine):
+    with Session(v2_engine) as session:
+        session.add_all([_problem("coin-change", "medium"), _problem("two-sum", "easy")])
+        session.commit()
+    adapter = SQLCoachDomainAdapter(v2_engine)
+
+    first = await adapter.commit_canonical_attempt(
+        chat_id=1,
+        problem_slug="coin-change",
+        outcome="solved",
+        feedback="passed",
+        lesson_delta={},
+        operation_key="telegram-message-42",
+    )
+    replay = await adapter.commit_canonical_attempt(
+        chat_id=1,
+        problem_slug="coin-change",
+        outcome="solved",
+        feedback="passed",
+        lesson_delta={},
+        operation_key="telegram-message-42",
+    )
+    second_problem = await adapter.commit_canonical_attempt(
+        chat_id=1,
+        problem_slug="two-sum",
+        outcome="solved",
+        feedback="passed",
+        lesson_delta={},
+        operation_key="telegram-message-42",
+    )
+
+    assert first["problem_slug"] == "coin-change"
+    assert replay == {"replayed": True}
+    assert second_problem["problem_slug"] == "two-sum"
+    with Session(v2_engine) as session:
+        assert len(session.exec(select(V2Attempt)).all()) == 2
+
+
+@pytest.mark.asyncio
 async def test_run_state_alias_round_trip_and_expiry(v2_engine):
     repository = SQLRunStateRepository(v2_engine)
     state = SerializedRunState.new(
@@ -220,6 +328,8 @@ async def test_paused_metrics_update_preserves_resumable_sdk_state(v2_engine):
     await repository.save(state)
     application = CoachApplication.__new__(CoachApplication)
     application.engine = v2_engine
+    application.domain = object()
+    application.advisor = object()
     application.agent_settings = AgentSettings()
     application._persist_metrics(
         8,
@@ -302,10 +412,13 @@ async def test_learning_profile_bounds_attempt_feedback(v2_engine):
 
 
 @pytest.mark.asyncio
-async def test_pending_approval_blocks_a_second_agent_run(v2_engine, monkeypatch):
+async def test_new_message_supersedes_pending_approval_and_runs(v2_engine, monkeypatch):
     from leetcode_coach import application as application_module
 
     class FakeRepository:
+        def __init__(self):
+            self.abandoned = []
+
         async def pending_rows(self, chat_id):
             return [
                 SimpleNamespace(
@@ -315,9 +428,16 @@ async def test_pending_approval_blocks_a_second_agent_run(v2_engine, monkeypatch
                 )
             ]
 
+        async def abandon(self, *, chat_id):
+            self.abandoned.append(chat_id)
+
     class FakeRunner:
+        def __init__(self):
+            self.messages = []
+
         async def run(self, **kwargs):
-            raise AssertionError("a second agent run must not start")
+            self.messages.append(kwargs["message"])
+            return AgentRunOutcome("completed", "handled", [], {})
 
     sent = []
 
@@ -328,9 +448,16 @@ async def test_pending_approval_blocks_a_second_agent_run(v2_engine, monkeypatch
     monkeypatch.setattr(application_module, "send_message", fake_send)
     application = CoachApplication.__new__(CoachApplication)
     application.engine = v2_engine
+    application.domain = object()
+    application.advisor = object()
     application.repository = FakeRepository()
     application.runner = FakeRunner()
     application._locks = defaultdict(asyncio.Lock)
+
+    async def fake_deliver(*args, **kwargs):
+        return None
+
+    application._deliver_outcome = fake_deliver
 
     await application.handle_text(
         chat_id=1,
@@ -339,7 +466,161 @@ async def test_pending_approval_blocks_a_second_agent_run(v2_engine, monkeypatch
         reply_to_message_id=None,
     )
 
-    assert sent == ["Resolve the pending approval with Approve/Reject or exact yes/no first."]
+    assert application.repository.abandoned == [1]
+    assert application.runner.messages == ["give me another proposal"]
+    assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_unsent_proposal_does_not_preempt_explicit_solve_message(v2_engine):
+    class FakeRepository:
+        async def pending_rows(self, chat_id):
+            return []
+
+        async def abandon(self, *, chat_id):
+            return None
+
+    class FakeRunner:
+        def __init__(self):
+            self.messages = []
+
+        async def run(self, **kwargs):
+            self.messages.append(kwargs["message"])
+            return AgentRunOutcome("completed", "credited", [], {})
+
+    application = CoachApplication.__new__(CoachApplication)
+    application.engine = v2_engine
+    application.domain = object()
+    application.advisor = object()
+    application.repository = FakeRepository()
+    application.runner = FakeRunner()
+    application._locks = defaultdict(asyncio.Lock)
+    proposal_checks = []
+
+    async def fake_unsent(chat_id):
+        proposal_checks.append(chat_id)
+        return True
+
+    async def fake_deliver(*args, **kwargs):
+        return None
+
+    application._send_unsent_proposal = fake_unsent
+    application._deliver_outcome = fake_deliver
+
+    await application.handle_text(
+        chat_id=1,
+        text="I solved coin-change; record it",
+        message_id=12,
+        reply_to_message_id=None,
+    )
+
+    assert application.runner.messages == ["I solved coin-change; record it"]
+    assert proposal_checks == []
+
+
+@pytest.mark.asyncio
+async def test_stale_unsent_proposal_does_not_hide_fresh_result(v2_engine, monkeypatch):
+    from leetcode_coach import application as application_module
+
+    sent = []
+
+    async def fake_send(chat_id, text, **kwargs):
+        sent.append((text, kwargs))
+        return 1
+
+    application = CoachApplication.__new__(CoachApplication)
+    application.engine = v2_engine
+    application.repository = SimpleNamespace()
+    application._persist_metrics = lambda *args: None
+    application._send_unsent_proposal = lambda chat_id: _async_value(True)
+    application._send_unsent_reviews = lambda chat_id: _async_value(None)
+    monkeypatch.setattr(application_module, "send_message", fake_send)
+
+    await application._deliver_outcome(
+        1,
+        AgentRunOutcome("completed", "Both solved attempts were recorded.", [], {}),
+        reply_to_message_id=12,
+    )
+
+    assert [item[0] for item in sent] == ["Both solved attempts were recorded."]
+
+
+async def _async_value(value):
+    return value
+
+
+@pytest.mark.asyncio
+async def test_one_message_records_two_canonical_attempts_once_without_approval_ui(
+    v2_engine, monkeypatch
+):
+    from leetcode_coach import application as application_module
+
+    with Session(v2_engine) as session:
+        session.add_all([_problem("coin-change", "medium"), _problem("two-sum", "easy")])
+        session.commit()
+
+    class FakeRunner:
+        async def run(self, **kwargs):
+            context = kwargs["context"]
+            for slug in ("coin-change", "two-sum", "coin-change", "two-sum"):
+                await context.domain.commit_canonical_attempt(
+                    chat_id=context.chat_id,
+                    problem_slug=slug,
+                    outcome="solved",
+                    feedback="passed",
+                    lesson_delta={},
+                    operation_key=context.operation_key,
+                )
+            return AgentRunOutcome("completed", "Recorded both solved problems.", [], {})
+
+    sent = []
+
+    async def fake_send(chat_id, text, **kwargs):
+        sent.append((text, kwargs))
+        return len(sent)
+
+    monkeypatch.setattr(application_module, "send_message", fake_send)
+    application = CoachApplication.__new__(CoachApplication)
+    application.engine = v2_engine
+    application.domain = SQLCoachDomainAdapter(v2_engine)
+    application.advisor = object()
+    application.repository = SQLRunStateRepository(v2_engine)
+    application.runner = FakeRunner()
+    application.agent_settings = AgentSettings()
+    application._locks = defaultdict(asyncio.Lock)
+
+    await application.handle_text(
+        chat_id=1,
+        text="I solved coin-change and two-sum; record both",
+        message_id=44,
+        reply_to_message_id=None,
+    )
+
+    with Session(v2_engine) as session:
+        attempts = session.exec(select(V2Attempt).order_by(V2Attempt.id)).all()
+        assert [row.problem_slug for row in attempts] == ["coin-change", "two-sum"]
+        assert session.exec(select(V2PendingApproval)).all() == []
+    assert sent == [("Recorded both solved problems.", {"reply_to_message_id": 44})]
+
+
+@pytest.mark.asyncio
+async def test_repository_abandon_expires_pending_approvals(v2_engine):
+    repository = SQLRunStateRepository(v2_engine)
+    state = SerializedRunState.new(
+        chat_id=7,
+        sdk_state={"opaque": True},
+        approvals=[PendingApproval("call-1", "skip_problem", "call-1", {}, "Skip?")],
+    )
+    await repository.save(state)
+
+    await repository.abandon(chat_id=7)
+
+    assert await repository.pending_rows(7) == []
+    with Session(v2_engine) as session:
+        run = session.get(V2AgentRun, state.run_id)
+        approval = session.exec(select(V2PendingApproval)).one()
+        assert run.status == "failed"
+        assert approval.status == ApprovalStatus.EXPIRED
 
 
 @pytest.mark.asyncio

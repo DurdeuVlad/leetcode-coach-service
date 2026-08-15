@@ -52,6 +52,7 @@ class CoachDomain(Protocol):
         outcome: str,
         feedback: str,
         lesson_delta: JsonObject,
+        operation_key: str | None = None,
     ) -> JsonObject: ...
 
     async def commit_canonical_attempt(
@@ -71,11 +72,19 @@ class CoachDomain(Protocol):
 
     async def reattempt_problem(self, *, chat_id: int, review_id: str) -> JsonObject: ...
 
-    async def extend_proposal(self, *, chat_id: int, batch_id: str) -> JsonObject: ...
+    async def extend_proposal(
+        self, *, chat_id: int, batch_id: str, operation_key: str | None = None
+    ) -> JsonObject: ...
 
     async def accept_credit_deficit(self, *, chat_id: int, date: str) -> JsonObject: ...
 
-    async def adjust_lesson(self, *, chat_id: int, lesson_delta: JsonObject) -> JsonObject: ...
+    async def adjust_lesson(
+        self,
+        *,
+        chat_id: int,
+        lesson_delta: JsonObject,
+        operation_key: str | None = None,
+    ) -> JsonObject: ...
 
 
 class RunStateRepository(Protocol):
@@ -90,6 +99,8 @@ class RunStateRepository(Protocol):
     async def load(self, *, chat_id: int) -> SerializedRunState | None: ...
 
     async def delete(self, *, chat_id: int, run_id: str) -> None: ...
+
+    async def abandon(self, *, chat_id: int) -> None: ...
 
 
 # Deferred to avoid a runtime import cycle while retaining usable Protocol hints.

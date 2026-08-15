@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import json
 import uuid
 from decimal import Decimal
@@ -132,14 +133,32 @@ class CoachDomain:
         outcome: str,
         feedback: str = "",
         lesson_delta: dict[str, Any] | None = None,
-    ) -> V2Attempt:
-        review = self._open_review(chat_id, review_id)
+        *,
+        operation_key: str | None = None,
+    ) -> V2Attempt | dict[str, bool]:
         if outcome not in {"solved", "reviewed"}:
             raise DomainError("outcome must be solved or reviewed")
+        credit_key = None
+        if operation_key is not None:
+            credit_key = f"review_attempt:{chat_id}:{review_id}:{operation_key}"
+            if not operation_key or len(credit_key) > 200:
+                raise DomainError("attempt operation key is invalid")
+            existing = self.session.exec(
+                select(V2CreditLedger).where(V2CreditLedger.idempotency_key == credit_key)
+            ).first()
+            if existing is not None:
+                return {"replayed": True}
+        review = self._open_review(chat_id, review_id)
         problem = self.session.get(V2Problem, review.problem_slug)
         assert problem is not None
         return self._persist_attempt(
-            chat_id, problem, outcome, feedback, lesson_delta, review=review
+            chat_id,
+            problem,
+            outcome,
+            feedback,
+            lesson_delta,
+            review=review,
+            credit_idempotency_key=credit_key,
         )
 
     def commit_canonical_attempt(
@@ -158,7 +177,7 @@ class CoachDomain:
         problem = self.session.get(V2Problem, problem_slug)
         if problem is None:
             raise NotFound("canonical problem not found")
-        idempotency_key = f"canonical_attempt:{chat_id}:{operation_key}"
+        idempotency_key = f"canonical_attempt:{chat_id}:{problem_slug}:{operation_key}"
         if not operation_key or len(idempotency_key) > 200:
             raise DomainError("canonical attempt operation key is invalid")
         existing = self.session.exec(
@@ -265,9 +284,18 @@ class CoachDomain:
         self.session.flush()
         return review
 
-    def extend_proposal(self, chat_id: int, batch_id: int, hours: int = 24) -> V2ProposalBatch:
+    def extend_proposal(
+        self,
+        chat_id: int,
+        batch_id: int,
+        hours: int = 24,
+        *,
+        operation_key: str | None = None,
+    ) -> V2ProposalBatch | dict[str, bool]:
         if not 1 <= hours <= 72:
             raise DomainError("extension must be between 1 and 72 hours")
+        if self._operation_replayed(chat_id, "extend", str(batch_id), operation_key):
+            return {"replayed": True}
         batch = self.session.get(V2ProposalBatch, batch_id)
         if batch is None or batch.chat_id != chat_id:
             raise NotFound("proposal batch not found")
@@ -321,8 +349,40 @@ class CoachDomain:
         ).one()
         return Decimal(str(result)).quantize(Decimal("0.01"))
 
-    def adjust_lesson(self, chat_id: int, lesson_delta: dict[str, Any]) -> V2Lesson:
+    def adjust_lesson(
+        self,
+        chat_id: int,
+        lesson_delta: dict[str, Any],
+        *,
+        operation_key: str | None = None,
+    ) -> V2Lesson | dict[str, bool]:
+        identity = str(lesson_delta.get("lesson_id") or lesson_delta.get("title") or "new")
+        if self._operation_replayed(chat_id, "lesson", identity, operation_key):
+            return {"replayed": True}
         return self._apply_lesson_delta(chat_id, lesson_delta)
+
+    def _operation_replayed(
+        self,
+        chat_id: int,
+        action: str,
+        identity: str,
+        operation_key: str | None,
+    ) -> bool:
+        """Claim one repeatable message-scoped mutation without a schema change."""
+        if operation_key is None:
+            return False
+        if not operation_key:
+            raise DomainError("operation key is invalid")
+        digest = hashlib.sha256(f"{action}:{identity}:{operation_key}".encode()).hexdigest()
+        key = f"operation:{digest}"
+        existing = self.session.exec(
+            select(V2BotState).where(V2BotState.chat_id == chat_id, V2BotState.key == key)
+        ).first()
+        if existing is not None:
+            return True
+        self.session.add(V2BotState(chat_id=chat_id, key=key, value=action))
+        self.session.flush()
+        return False
 
     def record_update(self, update_id: int, chat_id: int) -> bool:
         """Claim a new, failed, or abandoned update.

@@ -10,6 +10,7 @@ from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import delete, func
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 from leetcode_coach.agent.contracts import JsonObject
@@ -17,6 +18,7 @@ from leetcode_coach.agent.state import PendingApproval, SerializedRunState
 from leetcode_coach.db.models import (
     AgentRunStatus,
     ApprovalStatus,
+    Difficulty,
     ReviewStatus,
     V2AgentRun,
     V2Attempt,
@@ -29,6 +31,7 @@ from leetcode_coach.db.models import (
 )
 from leetcode_coach.domain.schemas import ProposalSelection
 from leetcode_coach.domain.services import CoachDomain as SyncCoachDomain
+from leetcode_coach.integrations.leetcode import exact_problem_slug, fetch_exact_problem
 
 
 def _jsonable(value: Any) -> Any:
@@ -180,12 +183,43 @@ class SQLCoachDomainAdapter:
 
     async def get_problem(self, *, chat_id: int, slug: str) -> JsonObject | None:
         del chat_id
+        normalized = exact_problem_slug(slug)
 
         def query(session: Session):
-            problem = session.get(V2Problem, slug)
+            problem = session.get(V2Problem, normalized)
             return _problem_view(problem) if problem is not None else None
 
-        return await self._read(query)
+        existing = await self._read(query)
+        if existing is not None:
+            return existing
+
+        record = await fetch_exact_problem(slug)
+
+        def cache(session: Session):
+            problem = session.get(V2Problem, record.slug)
+            if problem is None:
+                problem = V2Problem(
+                    slug=record.slug,
+                    title=record.title,
+                    url=f"https://leetcode.com/problems/{record.slug}/",
+                    difficulty=Difficulty(record.difficulty),
+                    tags=record.tags,
+                    eligible=False,
+                )
+                session.add(problem)
+                session.flush()
+            return _problem_view(problem)
+
+        try:
+            return await self._write(cache)
+        except IntegrityError:
+            # A scheduler refresh or concurrent lookup may have inserted the exact
+            # slug after the miss. The failed session rolls back on context exit;
+            # read the winning canonical row instead of surfacing a uniqueness race.
+            winner = await self._read(query)
+            if winner is None:
+                raise
+            return winner
 
     async def get_open_queue(self, *, chat_id: int) -> JsonObject:
         def query(session: Session):
@@ -276,10 +310,16 @@ class SQLCoachDomainAdapter:
         outcome: str,
         feedback: str,
         lesson_delta: JsonObject,
+        operation_key: str | None = None,
     ) -> JsonObject:
         return await self._write(
             lambda session: SyncCoachDomain(session).commit_attempt(
-                chat_id, int(review_id), outcome, feedback, lesson_delta
+                chat_id,
+                int(review_id),
+                outcome,
+                feedback,
+                lesson_delta,
+                operation_key=operation_key,
             )
         )
 
@@ -319,9 +359,13 @@ class SQLCoachDomainAdapter:
             lambda session: SyncCoachDomain(session).reattempt_problem(chat_id, int(review_id))
         )
 
-    async def extend_proposal(self, *, chat_id: int, batch_id: str) -> JsonObject:
+    async def extend_proposal(
+        self, *, chat_id: int, batch_id: str, operation_key: str | None = None
+    ) -> JsonObject:
         return await self._write(
-            lambda session: SyncCoachDomain(session).extend_proposal(chat_id, int(batch_id))
+            lambda session: SyncCoachDomain(session).extend_proposal(
+                chat_id, int(batch_id), operation_key=operation_key
+            )
         )
 
     async def accept_credit_deficit(self, *, chat_id: int, date: str) -> JsonObject:
@@ -331,9 +375,17 @@ class SQLCoachDomainAdapter:
             )
         )
 
-    async def adjust_lesson(self, *, chat_id: int, lesson_delta: JsonObject) -> JsonObject:
+    async def adjust_lesson(
+        self,
+        *,
+        chat_id: int,
+        lesson_delta: JsonObject,
+        operation_key: str | None = None,
+    ) -> JsonObject:
         return await self._write(
-            lambda session: SyncCoachDomain(session).adjust_lesson(chat_id, lesson_delta)
+            lambda session: SyncCoachDomain(session).adjust_lesson(
+                chat_id, lesson_delta, operation_key=operation_key
+            )
         )
 
 
@@ -446,6 +498,35 @@ class SQLRunStateRepository:
                 if run is not None and run.chat_id == chat_id:
                     run.status = AgentRunStatus.COMPLETED
                     run.completed_at = utcnow()
+                session.commit()
+
+        await asyncio.to_thread(execute)
+
+    async def abandon(self, *, chat_id: int) -> None:
+        """Expire paused runs when a newer user message supersedes them."""
+
+        def execute():
+            with Session(self.engine) as session:
+                runs = session.exec(
+                    select(V2AgentRun).where(
+                        V2AgentRun.chat_id == chat_id,
+                        V2AgentRun.status == AgentRunStatus.PAUSED,
+                    )
+                ).all()
+                run_ids = [run.id for run in runs]
+                for run in runs:
+                    run.status = AgentRunStatus.FAILED
+                    run.completed_at = utcnow()
+                if run_ids:
+                    approvals = session.exec(
+                        select(V2PendingApproval).where(
+                            V2PendingApproval.agent_run_id.in_(run_ids),
+                            V2PendingApproval.status == ApprovalStatus.PENDING,
+                        )
+                    ).all()
+                    for approval in approvals:
+                        approval.status = ApprovalStatus.EXPIRED
+                        approval.resolved_at = utcnow()
                 session.commit()
 
         await asyncio.to_thread(execute)

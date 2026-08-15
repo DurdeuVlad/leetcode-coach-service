@@ -23,6 +23,7 @@ from leetcode_coach.db.models import (
     V2AgentRun,
     V2Attempt,
     V2ConversationItem,
+    V2CreditLedger,
     V2Lesson,
     V2PendingApproval,
     V2PendingReview,
@@ -53,6 +54,31 @@ def _jsonable(value: Any) -> Any:
 def _clip(value: Any, limit: int) -> str:
     text = str(value or "")
     return text if len(text) <= limit else f"{text[: limit - 1]}…"
+
+
+def _money(value: Decimal, *, signed: bool = False) -> str:
+    amount = value.quantize(Decimal("0.01"))
+    return f"{amount:+.2f}" if signed else f"{amount:.2f}"
+
+
+def _attempt_receipt(
+    *,
+    title: str,
+    outcome: str,
+    balance_before: Decimal,
+    balance_after: Decimal,
+    queued: bool,
+    replayed: bool,
+) -> JsonObject:
+    earned = Decimal("0.00") if replayed else balance_after - balance_before
+    return {
+        "title": title,
+        "result": outcome.capitalize(),
+        "credit": _money(earned, signed=True),
+        "balance": f"{_money(balance_before)} → {_money(balance_after)}",
+        "path": "Open queue" if queued else "Direct attempt (no queue needed)",
+        "replayed": replayed,
+    }
 
 
 def _problem_view(problem: V2Problem) -> JsonObject:
@@ -312,8 +338,12 @@ class SQLCoachDomainAdapter:
         lesson_delta: JsonObject,
         operation_key: str | None = None,
     ) -> JsonObject:
-        return await self._write(
-            lambda session: SyncCoachDomain(session).commit_attempt(
+        def commit(session: Session):
+            review = session.get(V2PendingReview, int(review_id))
+            problem = session.get(V2Problem, review.problem_slug) if review is not None else None
+            domain = SyncCoachDomain(session)
+            balance_before = domain.credit_balance(chat_id)
+            result = domain.commit_attempt(
                 chat_id,
                 int(review_id),
                 outcome,
@@ -321,7 +351,31 @@ class SQLCoachDomainAdapter:
                 lesson_delta,
                 operation_key=operation_key,
             )
-        )
+            replayed = isinstance(result, dict) and result.get("replayed") is True
+            recorded_outcome = outcome
+            if replayed and operation_key is not None:
+                key = f"review_attempt:{chat_id}:{review_id}:{operation_key}"
+                entry = session.exec(
+                    select(V2CreditLedger).where(V2CreditLedger.idempotency_key == key)
+                ).one()
+                recorded_outcome = entry.reason
+            balance_after = domain.credit_balance(chat_id)
+            payload = _jsonable(result)
+            assert isinstance(payload, dict)
+            assert problem is not None
+            return {
+                **payload,
+                "receipt": _attempt_receipt(
+                    title=problem.title,
+                    outcome=recorded_outcome,
+                    balance_before=balance_before,
+                    balance_after=balance_after,
+                    queued=True,
+                    replayed=replayed,
+                ),
+            }
+
+        return await self._write(commit)
 
     async def commit_canonical_attempt(
         self,
@@ -333,8 +387,11 @@ class SQLCoachDomainAdapter:
         lesson_delta: JsonObject,
         operation_key: str,
     ) -> JsonObject:
-        return await self._write(
-            lambda session: SyncCoachDomain(session).commit_canonical_attempt(
+        def commit(session: Session):
+            problem = session.get(V2Problem, problem_slug)
+            domain = SyncCoachDomain(session)
+            balance_before = domain.credit_balance(chat_id)
+            result = domain.commit_canonical_attempt(
                 chat_id,
                 problem_slug,
                 outcome,
@@ -342,7 +399,33 @@ class SQLCoachDomainAdapter:
                 lesson_delta,
                 operation_key=operation_key,
             )
-        )
+            replayed = isinstance(result, dict) and result.get("replayed") is True
+            queued = getattr(result, "review_id", None) is not None
+            recorded_outcome = outcome
+            if replayed:
+                key = f"canonical_attempt:{chat_id}:{problem_slug}:{operation_key}"
+                entry = session.exec(
+                    select(V2CreditLedger).where(V2CreditLedger.idempotency_key == key)
+                ).one()
+                queued = entry.review_id is not None
+                recorded_outcome = entry.reason
+            balance_after = domain.credit_balance(chat_id)
+            payload = _jsonable(result)
+            assert isinstance(payload, dict)
+            assert problem is not None
+            return {
+                **payload,
+                "receipt": _attempt_receipt(
+                    title=problem.title,
+                    outcome=recorded_outcome,
+                    balance_before=balance_before,
+                    balance_after=balance_after,
+                    queued=queued,
+                    replayed=replayed,
+                ),
+            }
+
+        return await self._write(commit)
 
     async def skip_problem(self, *, chat_id: int, review_id: str) -> JsonObject:
         return await self._write(

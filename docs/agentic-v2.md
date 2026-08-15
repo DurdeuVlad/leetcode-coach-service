@@ -95,6 +95,14 @@ must not refuse verified work merely because the queue or eligible pool is empty
 Replaying the same Telegram operation for the same slug is a no-op; a separately
 reported attempt remains valid even for the same canonical problem.
 
+Every attempt write also produces a deterministic plain-text work receipt from
+facts read inside the write transaction: canonical title, recorded result, earned
+credit, before/after balance, and either `Open queue` or
+`Direct attempt (no queue needed)`. The runtime carries these facts outside the
+model transcript and sends receipts in attempt order before Terra's coaching text.
+A replay says `Already recorded`, earns `+0.00`, and shows the unchanged current
+balance; Terra's final text is coaching-only and does not restate receipt facts.
+
 Legacy paused approvals remain readable during rollout, but any fresh user instruction
 supersedes the obsolete paused run and expires its pending controls without executing
 them. Unsent proposal or review delivery never preempts a fresh instruction or hides
@@ -133,6 +141,8 @@ rollback, then remove them only after a stable observability review.
   stale callback, and duplicate update behavior are deterministic.
 - Rejected/expired writes leave domain state unchanged; replayed updates never
   repeat writes.
+- Attempt receipts use authoritative transactional facts, preserve multi-attempt
+  order, precede coaching, and show replay as zero new credit at the current balance.
 - Terra calls Sol no more than once; Sol has no write path or approval bypass.
 - Cache telemetry, max turns, timeouts, malformed tool input, provider outage,
   and partial Telegram failure are tested and fail loudly.

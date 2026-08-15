@@ -48,6 +48,23 @@ def render_proposal_html(candidates: Sequence[object], *, balance: str | None = 
     return "\n".join(lines).rstrip()
 
 
+def render_work_receipt(receipt: Mapping[str, object]) -> str:
+    """Render authoritative attempt facts as plain Telegram text."""
+
+    heading = "Already recorded" if receipt.get("replayed") is True else "Your work counts"
+    return "\n".join(
+        [
+            heading,
+            "",
+            f"Problem: {_plain(receipt['title'])}",
+            f"Result: {_plain(receipt['result'])}",
+            f"Credit: {_plain(receipt['credit'])}",
+            f"Balance: {_plain(receipt['balance'])}",
+            f"Path: {_plain(receipt['path'])}",
+        ]
+    )
+
+
 def approval_keyboard(approval_id: str) -> dict[str, list[list[dict[str, str]]]]:
     return {
         "inline_keyboard": [

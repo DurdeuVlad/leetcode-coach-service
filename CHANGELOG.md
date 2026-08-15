@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-08-15 — Deterministic work receipts
+
+- Send a database-authoritative receipt for every recorded or replayed attempt before coaching.
+- Show canonical title, result, earned credit, balance transition, and queue/direct path.
+- Keep multi-attempt receipts ordered and make replays visibly earn `+0.00` at the current balance.
+
 ## 2026-08-15 — Direct coaching actions
 
 - Resolve exact LeetCode slugs on demand so valid solved work can be recorded even when the bounded local registry misses it.

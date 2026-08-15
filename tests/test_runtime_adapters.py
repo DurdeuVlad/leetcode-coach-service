@@ -1,5 +1,6 @@
 import asyncio
 from collections import defaultdict
+from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
@@ -15,6 +16,7 @@ from leetcode_coach.db.models import (
     Difficulty,
     V2AgentRun,
     V2Attempt,
+    V2CreditLedger,
     V2PendingApproval,
     V2PendingReview,
     V2Problem,
@@ -166,13 +168,110 @@ async def test_empty_queue_canonical_attempt_adapter_replay_is_a_no_op(v2_engine
     )
 
     assert first["review_id"] is None
-    assert replay == {"replayed": True}
+    assert replay["replayed"] is True
     with Session(v2_engine) as session:
         assert len(session.exec(select(V2Attempt)).all()) == 1
         assert (
             session.get(V2Problem, "longest-substring-without-repeating-characters").times_attempted
             == 1
         )
+
+
+@pytest.mark.asyncio
+async def test_queue_less_solved_attempt_returns_authoritative_receipt(v2_engine):
+    with Session(v2_engine) as session:
+        session.add(_problem("coin-change", "medium"))
+        session.commit()
+
+    result = await SQLCoachDomainAdapter(v2_engine).commit_canonical_attempt(
+        chat_id=1,
+        problem_slug="coin-change",
+        outcome="solved",
+        feedback="passed",
+        lesson_delta={},
+        operation_key="message-1",
+    )
+
+    assert result["receipt"] == {
+        "title": "Coin Change",
+        "result": "Solved",
+        "credit": "+1.00",
+        "balance": "0.00 → 1.00",
+        "path": "Direct attempt (no queue needed)",
+        "replayed": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_matched_reviewed_attempt_returns_open_queue_receipt(v2_engine):
+    with Session(v2_engine) as session:
+        session.add(_problem("two-sum", "easy"))
+        review = V2PendingReview(chat_id=1, problem_slug="two-sum")
+        session.add(review)
+        session.commit()
+        review_id = review.id
+
+    result = await SQLCoachDomainAdapter(v2_engine).commit_attempt(
+        chat_id=1,
+        review_id=str(review_id),
+        outcome="reviewed",
+        feedback="off by one",
+        lesson_delta={},
+        operation_key="message-2",
+    )
+
+    assert result["receipt"] == {
+        "title": "Two Sum",
+        "result": "Reviewed",
+        "credit": "+0.50",
+        "balance": "0.00 → 0.50",
+        "path": "Open queue",
+        "replayed": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_attempt_replay_reports_no_credit_at_current_balance(v2_engine):
+    with Session(v2_engine) as session:
+        session.add(_problem("coin-change", "medium"))
+        session.commit()
+    adapter = SQLCoachDomainAdapter(v2_engine)
+    await adapter.commit_canonical_attempt(
+        chat_id=1,
+        problem_slug="coin-change",
+        outcome="solved",
+        feedback="passed",
+        lesson_delta={},
+        operation_key="message-3",
+    )
+    with Session(v2_engine) as session:
+        session.add(
+            V2CreditLedger(
+                chat_id=1,
+                amount=Decimal("-0.25"),
+                reason="test_adjustment",
+                idempotency_key="unrelated-balance-change",
+            )
+        )
+        session.commit()
+
+    replay = await adapter.commit_canonical_attempt(
+        chat_id=1,
+        problem_slug="coin-change",
+        outcome="reviewed",
+        feedback="different replay payload",
+        lesson_delta={},
+        operation_key="message-3",
+    )
+
+    assert replay["receipt"] == {
+        "title": "Coin Change",
+        "result": "Solved",
+        "credit": "+0.00",
+        "balance": "0.75 → 0.75",
+        "path": "Direct attempt (no queue needed)",
+        "replayed": True,
+    }
 
 
 @pytest.mark.asyncio
@@ -266,7 +365,7 @@ async def test_direct_attempt_replay_uses_message_and_problem_identity(v2_engine
     )
 
     assert first["problem_slug"] == "coin-change"
-    assert replay == {"replayed": True}
+    assert replay["replayed"] is True
     assert second_problem["problem_slug"] == "two-sum"
     with Session(v2_engine) as session:
         assert len(session.exec(select(V2Attempt)).all()) == 2
@@ -543,6 +642,104 @@ async def test_stale_unsent_proposal_does_not_hide_fresh_result(v2_engine, monke
     )
 
     assert [item[0] for item in sent] == ["Both solved attempts were recorded."]
+
+
+@pytest.mark.asyncio
+async def test_receipts_are_delivered_in_attempt_order_before_coaching(v2_engine, monkeypatch):
+    from leetcode_coach import application as application_module
+
+    sent = []
+
+    async def fake_send(chat_id, text, **kwargs):
+        sent.append((text, kwargs))
+        return len(sent)
+
+    application = CoachApplication.__new__(CoachApplication)
+    application.engine = v2_engine
+    application.repository = SimpleNamespace()
+    application._persist_metrics = lambda *args: None
+    application._send_unsent_proposal = lambda chat_id: _async_value(False)
+    application._send_unsent_reviews = lambda chat_id: _async_value(None)
+    monkeypatch.setattr(application_module, "send_message", fake_send)
+    receipts = [
+        {
+            "title": "Coin Change",
+            "result": "Solved",
+            "credit": "+1.00",
+            "balance": "0.00 → 1.00",
+            "path": "Direct attempt (no queue needed)",
+            "replayed": False,
+        },
+        {
+            "title": "Two Sum",
+            "result": "Reviewed",
+            "credit": "+0.50",
+            "balance": "1.00 → 1.50",
+            "path": "Open queue",
+            "replayed": False,
+        },
+    ]
+
+    await application._deliver_outcome(
+        1,
+        AgentRunOutcome("completed", "Try a boundary-case test next.", [], {}, receipts=receipts),
+        reply_to_message_id=12,
+    )
+
+    assert [message for message, _ in sent] == [
+        "Your work counts\n\nProblem: Coin Change\nResult: Solved\nCredit: +1.00\n"
+        "Balance: 0.00 → 1.00\nPath: Direct attempt (no queue needed)",
+        "Your work counts\n\nProblem: Two Sum\nResult: Reviewed\nCredit: +0.50\n"
+        "Balance: 1.00 → 1.50\nPath: Open queue",
+        "Try a boundary-case test next.",
+    ]
+    assert sent[0][0].splitlines()[0] != "Recorded"
+    assert all(kwargs == {"reply_to_message_id": 12} for _, kwargs in sent)
+
+
+@pytest.mark.asyncio
+async def test_replayed_receipt_says_already_recorded_and_no_credit(v2_engine, monkeypatch):
+    from leetcode_coach import application as application_module
+
+    sent = []
+
+    async def fake_send(chat_id, text, **kwargs):
+        sent.append(text)
+        return 1
+
+    application = CoachApplication.__new__(CoachApplication)
+    application.engine = v2_engine
+    application.repository = SimpleNamespace()
+    application._persist_metrics = lambda *args: None
+    application._send_unsent_proposal = lambda chat_id: _async_value(False)
+    application._send_unsent_reviews = lambda chat_id: _async_value(None)
+    monkeypatch.setattr(application_module, "send_message", fake_send)
+
+    await application._deliver_outcome(
+        1,
+        AgentRunOutcome(
+            "completed",
+            None,
+            [],
+            {},
+            receipts=[
+                {
+                    "title": "Coin Change",
+                    "result": "Solved",
+                    "credit": "+0.00",
+                    "balance": "0.75 → 0.75",
+                    "path": "Direct attempt (no queue needed)",
+                    "replayed": True,
+                }
+            ],
+        ),
+        reply_to_message_id=12,
+    )
+
+    assert sent == [
+        "Already recorded\n\nProblem: Coin Change\nResult: Solved\nCredit: +0.00\n"
+        "Balance: 0.75 → 0.75\nPath: Direct attempt (no queue needed)"
+    ]
 
 
 async def _async_value(value):

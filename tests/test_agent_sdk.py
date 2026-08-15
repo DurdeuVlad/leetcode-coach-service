@@ -1,6 +1,8 @@
+import json
 from types import SimpleNamespace
 
 import pytest
+from agents.tool_context import ToolContext
 from pydantic import ValidationError
 
 from leetcode_coach.agent.orchestrator import (
@@ -77,6 +79,70 @@ def test_attempt_tools_require_internal_message_operation_key() -> None:
     tools = {tool.name: tool for tool in agent.tools}
     assert "operation_key" not in str(tools["commit_attempt"].params_json_schema)
     assert "operation_key" not in str(tools["commit_canonical_attempt"].params_json_schema)
+
+
+@pytest.mark.asyncio
+async def test_attempt_tool_captures_receipt_out_of_band() -> None:
+    receipt = {
+        "title": "Coin Change",
+        "result": "Solved",
+        "credit": "+1.00",
+        "balance": "0.00 → 1.00",
+        "path": "Direct attempt (no queue needed)",
+        "replayed": False,
+    }
+
+    class FakeDomain:
+        async def commit_canonical_attempt(self, **kwargs):
+            return {"problem_slug": kwargs["problem_slug"], "receipt": receipt}
+
+    context = AgentRuntimeContext(
+        chat_id=1,
+        domain=FakeDomain(),
+        sol_advisor=object(),
+        operation_key="message-1",
+    )
+    tool = next(
+        tool for tool in create_terra_agent().tools if tool.name == "commit_canonical_attempt"
+    )
+
+    arguments = json.dumps(
+        {
+            "problem_slug": "coin-change",
+            "outcome": "solved",
+            "feedback": "passed",
+            "lesson_delta": {"lesson_id": None},
+        }
+    )
+    await tool.on_invoke_tool(
+        ToolContext(
+            context,
+            tool_name=tool.name,
+            tool_call_id="call-1",
+            tool_arguments=arguments,
+        ),
+        arguments,
+    )
+
+    assert context.receipts == [receipt]
+
+
+@pytest.mark.asyncio
+async def test_completed_outcome_carries_captured_receipts() -> None:
+    receipt = {"title": "Coin Change"}
+    context = AgentRuntimeContext(chat_id=1, domain=object(), sol_advisor=object())
+    context.receipts.append(receipt)
+    result = SimpleNamespace(
+        interruptions=[], raw_responses=[], final_output="Coaching only.", context_wrapper=None
+    )
+
+    outcome = await TerraCoachRunner(object())._outcome(result=result, context=context)
+
+    assert outcome.receipts == [receipt]
+
+
+def test_stable_prompt_reserves_final_text_for_coaching() -> None:
+    assert "Final text is coaching only" in CACHEABLE_TERRA_CONTEXT
 
 
 def test_runner_config_caps_local_tool_concurrency() -> None:

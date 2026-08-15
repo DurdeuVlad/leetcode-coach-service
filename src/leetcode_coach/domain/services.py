@@ -136,18 +136,78 @@ class CoachDomain:
         review = self._open_review(chat_id, review_id)
         if outcome not in {"solved", "reviewed"}:
             raise DomainError("outcome must be solved or reviewed")
-        review.status = ReviewStatus.DONE
-        review.updated_at = utcnow()
         problem = self.session.get(V2Problem, review.problem_slug)
         assert problem is not None
+        return self._persist_attempt(
+            chat_id, problem, outcome, feedback, lesson_delta, review=review
+        )
+
+    def commit_canonical_attempt(
+        self,
+        chat_id: int,
+        problem_slug: str,
+        outcome: str,
+        feedback: str = "",
+        lesson_delta: dict[str, Any] | None = None,
+        *,
+        operation_key: str,
+    ) -> V2Attempt | dict[str, bool]:
+        """Persist verified work for an exact canonical slug, with or without a queue."""
+        if outcome not in {"solved", "reviewed"}:
+            raise DomainError("outcome must be solved or reviewed")
+        problem = self.session.get(V2Problem, problem_slug)
+        if problem is None:
+            raise NotFound("canonical problem not found")
+        idempotency_key = f"canonical_attempt:{chat_id}:{operation_key}"
+        if not operation_key or len(idempotency_key) > 200:
+            raise DomainError("canonical attempt operation key is invalid")
+        existing = self.session.exec(
+            select(V2CreditLedger).where(V2CreditLedger.idempotency_key == idempotency_key)
+        ).first()
+        if existing is not None:
+            return {"replayed": True}
+        review = self.session.exec(
+            select(V2PendingReview)
+            .where(
+                V2PendingReview.chat_id == chat_id,
+                V2PendingReview.problem_slug == problem_slug,
+                V2PendingReview.status == ReviewStatus.OPEN,
+            )
+            .order_by(V2PendingReview.id)
+        ).first()
+        return self._persist_attempt(
+            chat_id,
+            problem,
+            outcome,
+            feedback,
+            lesson_delta,
+            review=review,
+            credit_idempotency_key=idempotency_key,
+        )
+
+    def _persist_attempt(
+        self,
+        chat_id: int,
+        problem: V2Problem,
+        outcome: str,
+        feedback: str,
+        lesson_delta: dict[str, Any] | None,
+        *,
+        review: V2PendingReview | None,
+        credit_idempotency_key: str | None = None,
+    ) -> V2Attempt:
+        """Apply the shared attempt, lesson, and credit transaction."""
+        if review is not None:
+            review.status = ReviewStatus.DONE
+            review.updated_at = utcnow()
         problem.times_attempted += 1
         problem.last_attempted = dt.date.today()
         if outcome == "solved":
             problem.solved = True
         attempt = V2Attempt(
             chat_id=chat_id,
-            review_id=review.id,
-            problem_slug=review.problem_slug,
+            review_id=review.id if review is not None else None,
+            problem_slug=problem.slug,
             outcome=outcome,
             feedback=feedback,
         )
@@ -158,8 +218,8 @@ class CoachDomain:
             chat_id,
             Decimal("1.00") if outcome == "solved" else Decimal("0.50"),
             outcome,
-            f"attempt:{attempt.id}",
-            review.id,
+            credit_idempotency_key or f"attempt:{attempt.id}",
+            review.id if review is not None else None,
         )
         return attempt
 

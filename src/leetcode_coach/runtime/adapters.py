@@ -283,6 +283,27 @@ class SQLCoachDomainAdapter:
             )
         )
 
+    async def commit_canonical_attempt(
+        self,
+        *,
+        chat_id: int,
+        problem_slug: str,
+        outcome: str,
+        feedback: str,
+        lesson_delta: JsonObject,
+        operation_key: str,
+    ) -> JsonObject:
+        return await self._write(
+            lambda session: SyncCoachDomain(session).commit_canonical_attempt(
+                chat_id,
+                problem_slug,
+                outcome,
+                feedback,
+                lesson_delta,
+                operation_key=operation_key,
+            )
+        )
+
     async def skip_problem(self, *, chat_id: int, review_id: str) -> JsonObject:
         return await self._write(
             lambda session: SyncCoachDomain(session).skip_problem(chat_id, int(review_id))

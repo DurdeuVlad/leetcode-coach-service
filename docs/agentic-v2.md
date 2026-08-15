@@ -67,8 +67,18 @@ problem refresh calls LeetCode directly and rejects non-exact slug matches.
 
 Write tools are atomic domain operations and accept identifiers plus confirmed
 outcomes, never model-supplied problem metadata: `commit_picks`,
-`commit_attempt`, `skip_problem`, `mark_solution_viewed`, `reattempt_problem`,
+`commit_attempt`, `commit_canonical_attempt`, `skip_problem`, `mark_solution_viewed`, `reattempt_problem`,
 `extend_proposal`, `accept_credit_deficit`, and `adjust_lesson`.
+
+`commit_canonical_attempt` records verified work against any exact canonical slug,
+including already-solved or currently ineligible problems. It closes and links the
+oldest matching open review when one exists; otherwise it creates an attempt without
+a review. It never fabricates a proposal or queue item. The agent must verify the
+slug with `get_problem`, ask for a slug or LeetCode URL when identity is unclear, and
+must not refuse verified work merely because the queue or eligible pool is empty.
+The trusted SDK approval call ID supplies an internal idempotency key that is never
+part of the model-facing tool schema. Replaying the same approved call is a no-op;
+a separately approved attempt remains valid even for the same canonical problem.
 
 Natural-language requests for a durable user-driven write pause in persisted
 human-in-the-loop approval state and show an action summary with Approve/Reject

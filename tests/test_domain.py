@@ -2,13 +2,17 @@ import datetime as dt
 from decimal import Decimal
 
 import pytest
-from sqlmodel import Session, create_engine
+from sqlmodel import Session, create_engine, select
 
 from leetcode_coach.db.models import (
     BaseSQLModel,
     Difficulty,
     ProposalStatus,
+    ReviewStatus,
+    V2Attempt,
+    V2CreditLedger,
     V2Lesson,
+    V2PendingReview,
     V2Problem,
     V2ProcessedUpdate,
 )
@@ -93,6 +97,104 @@ def test_picks_attempts_credits_and_idempotency(session):
 
 def test_empty_credit_balance_has_stable_two_decimal_representation(session):
     assert str(CoachDomain(session).credit_balance(999)) == "0.00"
+
+
+def test_canonical_attempt_without_review_rewards_real_work(session):
+    domain = CoachDomain(session)
+
+    attempt = domain.commit_canonical_attempt(
+        100,
+        "two-sum",
+        "solved",
+        "Correct sliding window",
+        {"title": "Track the window boundary", "category": "arrays"},
+        operation_key="call-no-review",
+    )
+
+    problem = session.get(V2Problem, "two-sum")
+    assert attempt.review_id is None
+    assert attempt.problem_slug == "two-sum"
+    assert problem.times_attempted == 1
+    assert problem.solved is True
+    assert domain.credit_balance(100) == Decimal("1.00")
+
+
+def test_canonical_attempt_closes_oldest_matching_open_review_only(session):
+    domain = CoachDomain(session)
+    first = V2PendingReview(chat_id=100, problem_slug="two-sum")
+    second = V2PendingReview(chat_id=100, problem_slug="two-sum")
+    other = V2PendingReview(chat_id=100, problem_slug="three-sum")
+    session.add_all([first, second, other])
+    session.flush()
+
+    attempt = domain.commit_canonical_attempt(
+        100, "two-sum", "reviewed", operation_key="call-matching-review"
+    )
+
+    assert attempt.review_id == first.id
+    assert first.status == ReviewStatus.DONE
+    assert second.status == ReviewStatus.OPEN
+    assert other.status == ReviewStatus.OPEN
+    assert domain.credit_balance(100) == Decimal("0.50")
+
+
+def test_canonical_attempt_accepts_already_solved_and_ineligible_problem(session):
+    problem = session.get(V2Problem, "house-robber")
+    problem.solved = True
+    problem.eligible = False
+    session.flush()
+
+    attempt = CoachDomain(session).commit_canonical_attempt(
+        100, "house-robber", "solved", operation_key="call-repeat-solved"
+    )
+
+    assert attempt.problem_slug == "house-robber"
+    assert problem.times_attempted == 1
+
+
+def test_canonical_attempt_rejects_unknown_slug_and_invalid_outcome_without_mutation(session):
+    domain = CoachDomain(session)
+    problem = session.get(V2Problem, "two-sum")
+
+    with pytest.raises(DomainError, match="outcome must be solved or reviewed"):
+        domain.commit_canonical_attempt(
+            100, "two-sum", "Solved", operation_key="call-invalid-outcome"
+        )
+    with pytest.raises(Exception, match="canonical problem not found"):
+        domain.commit_canonical_attempt(
+            100, "not-two-sum", "solved", operation_key="call-unknown-slug"
+        )
+
+    assert problem.times_attempted == 0
+    assert session.exec(select(V2Attempt)).all() == []
+    assert domain.credit_balance(100) == Decimal("0.00")
+
+
+def test_canonical_attempt_operation_key_makes_approval_replay_idempotent(session):
+    domain = CoachDomain(session)
+    lesson = V2Lesson(chat_id=100, title="Sliding windows", times_reinforced=1)
+    session.add(lesson)
+    session.flush()
+    delta = {"lesson_id": lesson.id, "reinforcement_delta": 1, "status": "active"}
+
+    first = domain.commit_canonical_attempt(
+        100, "two-sum", "solved", lesson_delta=delta, operation_key="call-123"
+    )
+    replay = domain.commit_canonical_attempt(
+        100, "two-sum", "solved", lesson_delta=delta, operation_key="call-123"
+    )
+    repeated_work = domain.commit_canonical_attempt(
+        100, "two-sum", "solved", lesson_delta=delta, operation_key="call-456"
+    )
+
+    assert first.id is not None
+    assert replay == {"replayed": True}
+    assert repeated_work.id != first.id
+    assert len(session.exec(select(V2Attempt)).all()) == 2
+    assert len(session.exec(select(V2CreditLedger)).all()) == 2
+    assert session.get(V2Problem, "two-sum").times_attempted == 2
+    assert lesson.times_reinforced == 3
+    assert domain.credit_balance(100) == Decimal("2.00")
 
 
 def test_confirmation_requires_matching_reply_or_exactly_one_pending(session):

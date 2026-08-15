@@ -16,6 +16,7 @@ from leetcode_coach.db.models import (
     V2AgentRun,
     V2Attempt,
     V2PendingApproval,
+    V2PendingReview,
     V2Problem,
 )
 from leetcode_coach.domain.exceptions import Conflict
@@ -78,6 +79,89 @@ async def test_draft_rejects_invented_slug(v2_engine):
     ]
     with pytest.raises(Exception, match="unknown canonical problem slug"):
         await adapter.draft_proposal(chat_id=1, selections=selections)
+
+
+@pytest.mark.asyncio
+async def test_canonical_attempt_adapter_returns_attempt_and_rolls_back_failures(v2_engine):
+    with Session(v2_engine) as session:
+        session.add(_problem("two-sum", "easy"))
+        session.add_all(
+            [
+                V2PendingReview(chat_id=1, problem_slug="two-sum"),
+                V2PendingReview(chat_id=1, problem_slug="two-sum"),
+            ]
+        )
+        session.commit()
+    adapter = SQLCoachDomainAdapter(v2_engine)
+    assert (await adapter.get_open_queue(chat_id=1))["reviews"]
+
+    result = await adapter.commit_canonical_attempt(
+        chat_id=1,
+        problem_slug="two-sum",
+        outcome="solved",
+        feedback="passed",
+        lesson_delta={},
+        operation_key="call-1",
+    )
+    with pytest.raises(Exception, match="new lesson delta requires title"):
+        await adapter.commit_canonical_attempt(
+            chat_id=1,
+            problem_slug="two-sum",
+            outcome="solved",
+            feedback="",
+            lesson_delta={"category": "arrays"},
+            operation_key="call-2",
+        )
+
+    assert result["problem_slug"] == "two-sum"
+    with Session(v2_engine) as session:
+        attempts = session.exec(select(V2Attempt).order_by(V2Attempt.id)).all()
+        assert [attempt.problem_slug for attempt in attempts] == ["two-sum"]
+        reviews = session.exec(select(V2PendingReview).order_by(V2PendingReview.id)).all()
+        assert result["review_id"] == reviews[0].id
+        assert [getattr(review.status, "value", review.status) for review in reviews] == [
+            "done",
+            "open",
+        ]
+        assert session.get(V2Problem, "two-sum").times_attempted == 1
+
+
+@pytest.mark.asyncio
+async def test_empty_queue_canonical_attempt_adapter_replay_is_a_no_op(v2_engine):
+    with Session(v2_engine) as session:
+        session.add(_problem("longest-substring-without-repeating-characters", "medium"))
+        session.commit()
+    adapter = SQLCoachDomainAdapter(v2_engine)
+
+    assert (await adapter.get_open_queue(chat_id=1))["reviews"] == []
+    assert (
+        await adapter.get_problem(chat_id=1, slug="longest-substring-without-repeating-characters")
+    )["slug"] == "longest-substring-without-repeating-characters"
+    first = await adapter.commit_canonical_attempt(
+        chat_id=1,
+        problem_slug="longest-substring-without-repeating-characters",
+        outcome="solved",
+        feedback="sliding window passed",
+        lesson_delta={},
+        operation_key="approved-call-1",
+    )
+    replay = await adapter.commit_canonical_attempt(
+        chat_id=1,
+        problem_slug="longest-substring-without-repeating-characters",
+        outcome="solved",
+        feedback="sliding window passed",
+        lesson_delta={},
+        operation_key="approved-call-1",
+    )
+
+    assert first["review_id"] is None
+    assert replay == {"replayed": True}
+    with Session(v2_engine) as session:
+        assert len(session.exec(select(V2Attempt)).all()) == 1
+        assert (
+            session.get(V2Problem, "longest-substring-without-repeating-characters").times_attempted
+            == 1
+        )
 
 
 @pytest.mark.asyncio

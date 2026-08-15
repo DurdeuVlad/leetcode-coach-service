@@ -111,6 +111,52 @@ async def test_refresh_raises_when_browserless_not_configured(monkeypatch) -> No
         await leetcode.fetch_recent_solved()
 
 
+@pytest.mark.asyncio
+@respx.mock
+async def test_resolve_exact_problem_accepts_leetcode_url_with_one_browserless_call(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(leetcode, "get_settings", lambda: _SETTINGS)
+    route = respx.post(_BROWSERLESS_URL).mock(
+        return_value=_browserless_response(
+            {
+                "data": {
+                    "problemsetQuestionList": {
+                        "questions": [
+                            {
+                                "title": "Coin Change",
+                                "titleSlug": "coin-change",
+                                "difficulty": "Medium",
+                                "topicTags": [{"slug": "dynamic-programming"}],
+                            }
+                        ]
+                    }
+                }
+            }
+        )
+    )
+
+    record = await leetcode.fetch_exact_problem(
+        "https://leetcode.com/problems/coin-change/description/?envType=study-plan"
+    )
+
+    assert route.call_count == 1
+    assert record == leetcode.ProblemRecord(
+        slug="coin-change",
+        title="Coin Change",
+        difficulty="medium",
+        tags="dynamic-programming",
+    )
+
+
+@pytest.mark.asyncio
+async def test_resolve_exact_problem_rejects_titles_and_non_leetcode_urls() -> None:
+    with pytest.raises(leetcode.LeetCodeV2Error, match="exact slug or leetcode.com problem URL"):
+        await leetcode.fetch_exact_problem("Coin Change")
+    with pytest.raises(leetcode.LeetCodeV2Error, match="exact slug or leetcode.com problem URL"):
+        await leetcode.fetch_exact_problem("https://example.com/problems/coin-change/")
+
+
 def test_build_function_url_handles_bare_domain() -> None:
     url = leetcode._build_function_url("https://browserless.example.com", "tok")
     assert url == "https://browserless.example.com/chrome/function?token=tok"

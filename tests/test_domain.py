@@ -197,6 +197,68 @@ def test_canonical_attempt_operation_key_makes_approval_replay_idempotent(sessio
     assert domain.credit_balance(100) == Decimal("2.00")
 
 
+def test_canonical_attempt_operation_key_includes_slug(session):
+    session.add(
+        V2Problem(
+            slug="coin-change",
+            title="Coin Change",
+            url="https://leetcode.com/problems/coin-change/",
+            difficulty=Difficulty.MEDIUM,
+            tags="dp",
+        )
+    )
+    session.flush()
+    domain = CoachDomain(session)
+
+    coin = domain.commit_canonical_attempt(
+        100, "coin-change", "solved", operation_key="telegram-message-9"
+    )
+    two_sum = domain.commit_canonical_attempt(
+        100, "two-sum", "solved", operation_key="telegram-message-9"
+    )
+
+    assert coin.problem_slug == "coin-change"
+    assert two_sum.problem_slug == "two-sum"
+    assert domain.credit_balance(100) == Decimal("2.00")
+
+
+def test_review_attempt_operation_key_replay_is_idempotent(session):
+    domain = CoachDomain(session)
+    batch, _ = domain.create_proposal(100, [ProposalSelection("two-sum")])
+    review = domain.commit_picks(100, batch.id, ["two-sum"])[0]
+
+    first = domain.commit_attempt(100, review.id, "solved", operation_key="telegram-message-11")
+    replay = domain.commit_attempt(100, review.id, "solved", operation_key="telegram-message-11")
+
+    assert first.problem_slug == "two-sum"
+    assert replay == {"replayed": True}
+    assert len(session.exec(select(V2Attempt)).all()) == 1
+
+
+def test_repeatable_ordinary_writes_use_message_operation_key(session):
+    domain = CoachDomain(session)
+    batch, _ = domain.create_proposal(100, [ProposalSelection("two-sum")])
+
+    extended = domain.extend_proposal(100, batch.id, operation_key="telegram-message-21")
+    extend_replay = domain.extend_proposal(100, batch.id, operation_key="telegram-message-21")
+    lesson = domain.adjust_lesson(
+        100,
+        {"title": "Sliding windows", "category": "arrays"},
+        operation_key="telegram-message-22",
+    )
+    lesson_replay = domain.adjust_lesson(
+        100,
+        {"title": "Sliding windows", "category": "arrays"},
+        operation_key="telegram-message-22",
+    )
+
+    assert extended.id == batch.id
+    assert extend_replay == {"replayed": True}
+    assert lesson.title == "Sliding windows"
+    assert lesson_replay == {"replayed": True}
+    assert len(session.exec(select(V2Lesson).where(V2Lesson.chat_id == 100)).all()) == 1
+
+
 def test_confirmation_requires_matching_reply_or_exactly_one_pending(session):
     domain = CoachDomain(session)
     first = domain.create_approval(100, "skip_problem", {"review_id": 1}, "Skip it")

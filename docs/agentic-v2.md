@@ -42,8 +42,13 @@ and Sol escalation reason for every run.
 
 ## Canonical data and rendering
 
-PostgreSQL is canonical for problem slug, title, URL, tags, difficulty, solved
-state, and eligibility. The model may choose slugs and provide teaching text;
+PostgreSQL caches canonical problem slug, title, URL, tags, difficulty, solved
+state, and eligibility. On an exact-slug miss, `get_problem` accepts that slug or
+an exact `leetcode.com/problems/{slug}` URL, makes one bounded Browserless lookup,
+requires an exact returned slug, and caches only LeetCode-supplied metadata. It does
+not search by title or accept model-supplied metadata. On-demand imports start with
+`eligible=false`, so a one-off solved problem cannot enter the proposal pool. The
+model may choose slugs and provide teaching text;
 code hydrates all displayed metadata. Reject unknown, duplicate, solved,
 ineligible, wrong-mix, or model-invented selections before persistence or
 Telegram output. `House Robber` is canonical easy and must never be stored or
@@ -61,14 +66,25 @@ Read tools are narrowly typed: `get_learning_profile`, `search_problem_pool`,
 and required difficulty mix, hydrates canonical fields, and produces the
 deterministic preview. Persisting that preview as an unsent proposal batch is
 pre-authorized operational staging, not a user-learning or outcome mutation.
-V2 has no Browserless or SearXNG dependency. `get_walkthroughs` remains a
-bounded empty result until a first-party tutorial source is adopted; canonical
-problem refresh calls LeetCode directly and rejects non-exact slug matches.
+`get_walkthroughs` remains a bounded empty result until a first-party tutorial
+source is adopted. Canonical refresh and exact-slug read-through use the existing
+Browserless-mediated LeetCode integration and reject non-exact slug matches.
 
 Write tools are atomic domain operations and accept identifiers plus confirmed
 outcomes, never model-supplied problem metadata: `commit_picks`,
 `commit_attempt`, `commit_canonical_attempt`, `skip_problem`, `mark_solution_viewed`, `reattempt_problem`,
 `extend_proposal`, `accept_credit_deficit`, and `adjust_lesson`.
+
+All ordinary coaching write tools execute immediately on an explicit user request;
+they do not pause in SDK approval state. Deterministic domain validation still rejects
+stale, unknown, ineligible, or otherwise invalid operations. The initial Telegram
+message ID is an internal operation key. Review
+attempt keys include the review ID, while canonical attempt keys include the slug,
+so replay is harmless and two distinct solved slugs in one message are each recorded
+once. Proposal picks, skip/view transitions, reattempts, and deficit acceptance are
+naturally idempotent through status or existing domain keys. Proposal extension and
+lesson adjustment use message-scoped operation guards because repeating them would
+otherwise mutate state twice. The key is never exposed to the model.
 
 `commit_canonical_attempt` records verified work against any exact canonical slug,
 including already-solved or currently ineligible problems. It closes and links the
@@ -76,17 +92,15 @@ oldest matching open review when one exists; otherwise it creates an attempt wit
 a review. It never fabricates a proposal or queue item. The agent must verify the
 slug with `get_problem`, ask for a slug or LeetCode URL when identity is unclear, and
 must not refuse verified work merely because the queue or eligible pool is empty.
-The trusted SDK approval call ID supplies an internal idempotency key that is never
-part of the model-facing tool schema. Replaying the same approved call is a no-op;
-a separately approved attempt remains valid even for the same canonical problem.
+Replaying the same Telegram operation for the same slug is a no-op; a separately
+reported attempt remains valid even for the same canonical problem.
 
-Natural-language requests for a durable user-driven write pause in persisted
-human-in-the-loop approval state and show an action summary with Approve/Reject
-buttons. Exact `yes`/`no` text is valid only as a reply to that approval or
-when exactly one approval is pending. An explicit action button is confirmation
-only for its exact operation. Pending approvals expire after 24 hours; stale
-buttons/replies are harmless. Scheduled tax, expiry, operational state,
-conversation storage, and idempotency records are pre-authorized system work.
+Legacy paused approvals remain readable during rollout, but any fresh user instruction
+supersedes the obsolete paused run and expires its pending controls without executing
+them. Unsent proposal or review delivery never preempts a fresh instruction or hides
+its result. Explicit action buttons continue to execute their exact deterministic
+operation. Scheduled tax, expiry, operational state, conversation storage, and
+idempotency records are pre-authorized system work.
 
 ## Schema and migration
 

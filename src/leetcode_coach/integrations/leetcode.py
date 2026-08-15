@@ -11,6 +11,7 @@ filled with wrong metadata).
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from urllib.parse import urlparse, urlunparse
 
@@ -88,6 +89,11 @@ def _build_function_url(base: str, token: str) -> str:
 )
 async def _post(query: str, variables: dict) -> dict:
     """POST one GraphQL query through the homelab Browserless /chrome/function."""
+    return await _post_once(query, variables)
+
+
+async def _post_once(query: str, variables: dict) -> dict:
+    """Make one bounded Browserless request without retrying it."""
     settings = get_settings()
     if not settings.browserless_url or settings.browserless_url == "mock":
         raise LeetCodeV2Error(
@@ -126,6 +132,45 @@ async def _post(query: str, variables: dict) -> dict:
         raise LeetCodeV2Error(f"LeetCode GraphQL errors: {payload['errors']}")
     log.info("leetcode_browserless_call_succeeded")
     return payload
+
+
+def exact_problem_slug(value: str) -> str:
+    """Extract an exact slug without guessing from titles or search terms."""
+    candidate = value.strip()
+    parsed = urlparse(candidate)
+    if parsed.scheme or parsed.netloc:
+        if parsed.scheme not in {"http", "https"} or parsed.hostname not in {
+            "leetcode.com",
+            "www.leetcode.com",
+        }:
+            raise LeetCodeV2Error(
+                "problem identity must be an exact slug or leetcode.com problem URL"
+            )
+        parts = [part for part in parsed.path.split("/") if part]
+        if len(parts) < 2 or parts[0] != "problems":
+            raise LeetCodeV2Error(
+                "problem identity must be an exact slug or leetcode.com problem URL"
+            )
+        candidate = parts[1]
+    if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", candidate):
+        raise LeetCodeV2Error("problem identity must be an exact slug or leetcode.com problem URL")
+    return candidate
+
+
+async def fetch_exact_problem(slug_or_url: str) -> ProblemRecord:
+    """Resolve one exact canonical problem using exactly one Browserless attempt."""
+    slug = exact_problem_slug(slug_or_url)
+    metadata = await _post_once(_META, {"filters": {"searchKeywords": slug}})
+    questions = metadata.get("data", {}).get("problemsetQuestionList", {}).get("questions", [])
+    exact = next((row for row in questions if row.get("titleSlug") == slug), None)
+    if exact is None:
+        raise LeetCodeV2Error(f"No exact canonical metadata match for {slug}")
+    return ProblemRecord(
+        slug=slug,
+        title=str(exact["title"]),
+        difficulty=str(exact["difficulty"]).lower(),
+        tags=",".join(str(tag["slug"]) for tag in exact.get("topicTags", [])),
+    )
 
 
 async def fetch_recent_solved(limit: int = 20) -> list[ProblemRecord]:

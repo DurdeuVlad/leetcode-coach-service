@@ -109,11 +109,12 @@ class CoachApplication:
                 if connection is not None:
                     await asyncio.to_thread(self._release_database_chat_lock, connection, chat_id)
 
-    def _context(self, chat_id: int) -> AgentRuntimeContext:
+    def _context(self, chat_id: int, *, operation_key: str | None = None) -> AgentRuntimeContext:
         return AgentRuntimeContext(
             chat_id=chat_id,
             domain=self.domain,
             sol_advisor=self.advisor,
+            operation_key=operation_key,
         )
 
     async def handle_text(
@@ -138,23 +139,12 @@ class CoachApplication:
                         chat_id, candidates[0].id, normalized == "yes", message_id
                     )
                     return
-            if pending:
-                sent = await self._send_pending_approvals(
-                    chat_id, pending, reply_to_message_id=message_id
-                )
-                if sent == 0:
-                    await send_message(
-                        chat_id,
-                        "Resolve the pending approval with Approve/Reject or exact yes/no first.",
-                        reply_to_message_id=message_id,
-                    )
-                return
-            if await self._send_unsent_proposal(chat_id):
-                await self._send_unsent_reviews(chat_id)
-                return
+            # A fresh user instruction supersedes any obsolete paused approval run.
+            # No interrupted tool has executed yet, so abandoning it fabricates no effect.
+            await self.repository.abandon(chat_id=chat_id)
             outcome = await self.runner.run(
                 message=text,
-                context=self._context(chat_id),
+                context=self._context(chat_id, operation_key=f"telegram-message-{message_id}"),
                 session=PostgresAgentSession(self.engine, chat_id),
             )
             await self._deliver_outcome(chat_id, outcome, reply_to_message_id=message_id)
@@ -296,9 +286,9 @@ class CoachApplication:
                 chat_id, rows, reply_to_message_id=reply_to_message_id
             )
             return
-        sent_proposal = await self._send_unsent_proposal(chat_id)
+        await self._send_unsent_proposal(chat_id)
         await self._send_unsent_reviews(chat_id)
-        if outcome.text and not sent_proposal:
+        if outcome.text:
             await send_message(
                 chat_id,
                 outcome.text,

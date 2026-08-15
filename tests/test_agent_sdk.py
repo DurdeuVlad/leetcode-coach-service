@@ -6,10 +6,12 @@ from pydantic import ValidationError
 from leetcode_coach.agent.orchestrator import (
     AGENT_RUN_TIMEOUT_SECONDS,
     CACHEABLE_TERRA_CONTEXT,
+    CANONICAL_LOOKUP_TIMEOUT_SECONDS,
     MAX_READ_TOOL_CONCURRENCY,
     MAX_TURNS,
     TERRA_MODEL,
     AgentMetrics,
+    AgentRuntimeContext,
     AgentSettings,
     TerraCoachRunner,
     _usage_metrics,
@@ -49,15 +51,31 @@ def test_terra_agent_has_bounded_model_and_expected_tools() -> None:
         "adjust_lesson",
     } == set(tools)
     assert all(
-        tools[name].needs_approval is True
-        for name in tools
-        if name.startswith(
-            ("commit_", "skip_", "mark_", "reattempt_", "extend_", "accept_", "adjust_")
-        )
+        tools[name].needs_approval is False
+        for name in {
+            "commit_picks",
+            "commit_attempt",
+            "commit_canonical_attempt",
+            "skip_problem",
+            "mark_solution_viewed",
+            "reattempt_problem",
+            "extend_proposal",
+            "accept_credit_deficit",
+            "adjust_lesson",
+        }
     )
     assert "Never refuse to record verified work solely" in CACHEABLE_TERRA_CONTEXT
     assert "ask for the problem slug or LeetCode URL" in CACHEABLE_TERRA_CONTEXT
     assert "use commit_canonical_attempt" in CACHEABLE_TERRA_CONTEXT
+    assert "operation_key" not in str(tools["commit_canonical_attempt"].params_json_schema)
+    assert tools["get_problem"].timeout_seconds == CANONICAL_LOOKUP_TIMEOUT_SECONDS == 70
+    assert tools["get_progress"].timeout_seconds != CANONICAL_LOOKUP_TIMEOUT_SECONDS
+
+
+def test_attempt_tools_require_internal_message_operation_key() -> None:
+    agent = create_terra_agent()
+    tools = {tool.name: tool for tool in agent.tools}
+    assert "operation_key" not in str(tools["commit_attempt"].params_json_schema)
     assert "operation_key" not in str(tools["commit_canonical_attempt"].params_json_schema)
 
 
@@ -149,3 +167,67 @@ def test_lesson_ids_are_database_integers_not_model_invented_names() -> None:
     with pytest.raises(ValidationError):
         LessonDelta(lesson_id="grid-connected-components")
     assert LessonDelta(lesson_id=7).lesson_id == 7
+
+
+@pytest.mark.asyncio
+async def test_legacy_attempt_approval_resume_uses_approval_id_as_operation_key(
+    monkeypatch,
+) -> None:
+    target = SimpleNamespace(call_id="legacy-attempt-call")
+    observed = {}
+
+    class FakeState:
+        def __init__(self, context):
+            self.context = context
+
+        def get_interruptions(self):
+            return [target]
+
+        def approve(self, item):
+            assert item is target
+
+        def reject(self, item, rejection_message):  # pragma: no cover - approve path only
+            raise AssertionError((item, rejection_message))
+
+    class FakeRunState:
+        @staticmethod
+        def from_json(agent, sdk_state, context_override):
+            del agent, sdk_state
+            return FakeState(context_override)
+
+    class FakeRunner:
+        @staticmethod
+        async def run(agent, state, run_config, session):
+            del agent, run_config, session
+            observed["operation_key"] = state.context.operation_key
+            return SimpleNamespace(interruptions=[], raw_responses=[], final_output="recorded")
+
+    class FakeRepository:
+        async def load(self, *, chat_id):
+            return SimpleNamespace(
+                chat_id=chat_id,
+                expired=False,
+                sdk_state={"legacy": True},
+                run_id="legacy-run",
+            )
+
+        async def delete(self, *, chat_id, run_id):
+            observed["deleted"] = (chat_id, run_id)
+
+    monkeypatch.setattr(agents, "RunState", FakeRunState)
+    monkeypatch.setattr(agents, "Runner", FakeRunner)
+    context = AgentRuntimeContext(chat_id=7, domain=object(), sol_advisor=object())
+
+    outcome = await TerraCoachRunner(FakeRepository()).resolve(
+        chat_id=7,
+        approval_id="legacy-attempt-call",
+        decision="approve",
+        context=context,
+    )
+
+    assert outcome.status == "completed"
+    assert observed == {
+        "operation_key": "legacy-attempt-call",
+        "deleted": (7, "legacy-run"),
+    }
+    assert context.operation_key is None

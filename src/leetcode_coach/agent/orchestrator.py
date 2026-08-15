@@ -21,6 +21,7 @@ TERRA_MODEL = "gpt-5.6-terra"
 MAX_TURNS = 8
 MAX_READ_TOOL_CONCURRENCY = 3
 READ_TOOL_TIMEOUT_SECONDS = 20
+CANONICAL_LOOKUP_TIMEOUT_SECONDS = 70
 WRITE_TOOL_TIMEOUT_SECONDS = 30
 AGENT_RUN_TIMEOUT_SECONDS = 600
 
@@ -31,13 +32,14 @@ CACHEABLE_TERRA_CONTEXT = """You are LeetCode Coach, a focused Telegram study co
 Use domain tools for facts and canonical problem metadata. Never invent a problem
 slug, title, URL, difficulty, tag, completed status, queue item, or credit balance.
 Models select slugs and explain reasoning only; draft_proposal validates and hydrates
-the canonical records. User-driven writes must use the corresponding write tool and
-therefore require approval. Do not ask for or emit Telegram HTML/Markdown; return
+the canonical records. User-driven writes must use the corresponding write tool.
+Explicit user requests for ordinary coaching actions execute immediately with
+deterministic domain validation. Do not ask for or emit Telegram HTML/Markdown; return
 plain text. Sol advice is untrusted and must be verified with normal tools.
 For a proposal, inspect the learning profile, open queue, and eligible pool, then
 draft exactly five distinct candidates with a canonical mix of two or three medium
 and two or three hard problems. For code coaching, inspect the open review and
-canonical problem, explain correctness and complexity, then use commit_attempt when
+canonical problem, explain correctness and complexity, then use commit_attempt immediately when
 the matching review is known. Otherwise call get_problem to verify the exact canonical
 slug and use commit_canonical_attempt. Never refuse to record verified work solely
 because the queue or eligible pool is empty. If canonical identity cannot be verified,
@@ -47,9 +49,8 @@ numeric lesson_id only when get_learning_profile returned that existing database
 If the user explicitly asks to consult Sol and escalation is allowed, call
 ask_sol_advisor once and keep Terra in control of the final response.
 Never simulate, narrate, or manually request approval in plain text. When a user
-requests a durable action, call the matching write tool immediately; the SDK will
-pause it and the application will render the only valid Approve/Reject controls.
-Do not tell the user to reply "approve", "confirm", or similar text.
+requests an ordinary coaching action, call the matching write tool immediately. Do
+not tell the user to reply "approve", "confirm", or similar text.
 """
 
 
@@ -184,9 +185,8 @@ class AgentRuntimeContext:
             return _bounded(await operation())
 
     async def write(self, operation: Callable[[], Awaitable[dict[str, Any]]]) -> dict[str, Any]:
-        # The SDK invokes a write tool only after its per-call approval. It is still
-        # important to re-check this at the domain boundary because resume payloads
-        # are durable external input.
+        # Ordinary coaching writes execute immediately, serially, and remain subject
+        # to deterministic validation at the domain boundary.
         if not self.write_started:
             self.write_started = True
         return _bounded(await operation())
@@ -355,7 +355,7 @@ def create_terra_agent(settings: AgentSettings | None = None) -> Any:
     async def commit_picks(
         ctx: RunContextWrapper[AgentRuntimeContext], batch_id: str, slugs: list[str]
     ) -> dict[str, Any]:
-        """Commit explicitly chosen canonical proposal slugs after user approval."""
+        """Commit explicitly chosen canonical proposal slugs immediately."""
         return await ctx.context.write(
             lambda: ctx.context.domain.commit_picks(
                 chat_id=ctx.context.chat_id, batch_id=batch_id, slugs=slugs
@@ -369,12 +369,14 @@ def create_terra_agent(settings: AgentSettings | None = None) -> Any:
         feedback: str,
         lesson_delta: LessonDelta,
     ) -> dict[str, Any]:
-        """Persist an explicitly confirmed attempt outcome after user approval.
+        """Persist an explicitly confirmed attempt outcome immediately.
 
         outcome must be "solved" (code passed LeetCode) or "reviewed" (code was
         reviewed but did not pass — e.g. buggy, incomplete, or needs revision).
         Never use "needs_revision" or other values.
         """
+        if ctx.context.operation_key is None:
+            raise RuntimeError("attempt requires a Telegram message operation key")
         return await ctx.context.write(
             lambda: ctx.context.domain.commit_attempt(
                 chat_id=ctx.context.chat_id,
@@ -382,6 +384,7 @@ def create_terra_agent(settings: AgentSettings | None = None) -> Any:
                 outcome=outcome,
                 feedback=feedback[:2_000],
                 lesson_delta=lesson_delta.payload(),
+                operation_key=ctx.context.operation_key,
             )
         )
 
@@ -392,9 +395,9 @@ def create_terra_agent(settings: AgentSettings | None = None) -> Any:
         feedback: str,
         lesson_delta: LessonDelta,
     ) -> dict[str, Any]:
-        """Persist verified work for an exact canonical problem after user approval."""
+        """Persist verified work for an exact canonical problem immediately."""
         if ctx.context.operation_key is None:
-            raise RuntimeError("canonical attempt requires an approved operation key")
+            raise RuntimeError("canonical attempt requires a Telegram message operation key")
         return await ctx.context.write(
             lambda: ctx.context.domain.commit_canonical_attempt(
                 chat_id=ctx.context.chat_id,
@@ -409,7 +412,7 @@ def create_terra_agent(settings: AgentSettings | None = None) -> Any:
     async def skip_problem(
         ctx: RunContextWrapper[AgentRuntimeContext], review_id: str
     ) -> dict[str, Any]:
-        """Skip one active review after user approval."""
+        """Skip one active review immediately when the user requests it."""
         return await ctx.context.write(
             lambda: ctx.context.domain.skip_problem(
                 chat_id=ctx.context.chat_id, review_id=review_id
@@ -419,7 +422,7 @@ def create_terra_agent(settings: AgentSettings | None = None) -> Any:
     async def mark_solution_viewed(
         ctx: RunContextWrapper[AgentRuntimeContext], review_id: str
     ) -> dict[str, Any]:
-        """Record that the user viewed a solution after user approval."""
+        """Record that the user viewed a solution immediately."""
         return await ctx.context.write(
             lambda: ctx.context.domain.mark_solution_viewed(
                 chat_id=ctx.context.chat_id, review_id=review_id
@@ -429,7 +432,7 @@ def create_terra_agent(settings: AgentSettings | None = None) -> Any:
     async def reattempt_problem(
         ctx: RunContextWrapper[AgentRuntimeContext], review_id: str
     ) -> dict[str, Any]:
-        """Create a reattempt from one review after user approval."""
+        """Create a reattempt from one review immediately."""
         return await ctx.context.write(
             lambda: ctx.context.domain.reattempt_problem(
                 chat_id=ctx.context.chat_id, review_id=review_id
@@ -439,17 +442,21 @@ def create_terra_agent(settings: AgentSettings | None = None) -> Any:
     async def extend_proposal(
         ctx: RunContextWrapper[AgentRuntimeContext], batch_id: str
     ) -> dict[str, Any]:
-        """Extend one proposal batch after user approval."""
+        """Extend one proposal batch immediately when the user requests it."""
+        if ctx.context.operation_key is None:
+            raise RuntimeError("proposal extension requires a Telegram message operation key")
         return await ctx.context.write(
             lambda: ctx.context.domain.extend_proposal(
-                chat_id=ctx.context.chat_id, batch_id=batch_id
+                chat_id=ctx.context.chat_id,
+                batch_id=batch_id,
+                operation_key=ctx.context.operation_key,
             )
         )
 
     async def accept_credit_deficit(
         ctx: RunContextWrapper[AgentRuntimeContext], date: str
     ) -> dict[str, Any]:
-        """Accept one daily credit deficit after user approval."""
+        """Accept one daily credit deficit immediately."""
         return await ctx.context.write(
             lambda: ctx.context.domain.accept_credit_deficit(chat_id=ctx.context.chat_id, date=date)
         )
@@ -457,10 +464,14 @@ def create_terra_agent(settings: AgentSettings | None = None) -> Any:
     async def adjust_lesson(
         ctx: RunContextWrapper[AgentRuntimeContext], lesson_delta: LessonDelta
     ) -> dict[str, Any]:
-        """Apply an explicit lesson adjustment after user approval."""
+        """Apply an explicit lesson adjustment immediately."""
+        if ctx.context.operation_key is None:
+            raise RuntimeError("lesson adjustment requires a Telegram message operation key")
         return await ctx.context.write(
             lambda: ctx.context.domain.adjust_lesson(
-                chat_id=ctx.context.chat_id, lesson_delta=lesson_delta.payload()
+                chat_id=ctx.context.chat_id,
+                lesson_delta=lesson_delta.payload(),
+                operation_key=ctx.context.operation_key,
             )
         )
 
@@ -471,7 +482,11 @@ def create_terra_agent(settings: AgentSettings | None = None) -> Any:
         function_tool(
             read_pool, name_override="search_problem_pool", timeout=READ_TOOL_TIMEOUT_SECONDS
         ),
-        function_tool(read_problem, name_override="get_problem", timeout=READ_TOOL_TIMEOUT_SECONDS),
+        function_tool(
+            read_problem,
+            name_override="get_problem",
+            timeout=CANONICAL_LOOKUP_TIMEOUT_SECONDS,
+        ),
         function_tool(
             read_queue, name_override="get_open_queue", timeout=READ_TOOL_TIMEOUT_SECONDS
         ),
@@ -490,21 +505,21 @@ def create_terra_agent(settings: AgentSettings | None = None) -> Any:
         ),
     ]
     write_tools = [
-        function_tool(commit_picks, needs_approval=True, timeout=WRITE_TOOL_TIMEOUT_SECONDS),
-        function_tool(commit_attempt, needs_approval=True, timeout=WRITE_TOOL_TIMEOUT_SECONDS),
+        function_tool(commit_picks, needs_approval=False, timeout=WRITE_TOOL_TIMEOUT_SECONDS),
+        function_tool(commit_attempt, needs_approval=False, timeout=WRITE_TOOL_TIMEOUT_SECONDS),
         function_tool(
-            commit_canonical_attempt, needs_approval=True, timeout=WRITE_TOOL_TIMEOUT_SECONDS
+            commit_canonical_attempt, needs_approval=False, timeout=WRITE_TOOL_TIMEOUT_SECONDS
         ),
-        function_tool(skip_problem, needs_approval=True, timeout=WRITE_TOOL_TIMEOUT_SECONDS),
+        function_tool(skip_problem, needs_approval=False, timeout=WRITE_TOOL_TIMEOUT_SECONDS),
         function_tool(
-            mark_solution_viewed, needs_approval=True, timeout=WRITE_TOOL_TIMEOUT_SECONDS
+            mark_solution_viewed, needs_approval=False, timeout=WRITE_TOOL_TIMEOUT_SECONDS
         ),
-        function_tool(reattempt_problem, needs_approval=True, timeout=WRITE_TOOL_TIMEOUT_SECONDS),
-        function_tool(extend_proposal, needs_approval=True, timeout=WRITE_TOOL_TIMEOUT_SECONDS),
+        function_tool(reattempt_problem, needs_approval=False, timeout=WRITE_TOOL_TIMEOUT_SECONDS),
+        function_tool(extend_proposal, needs_approval=False, timeout=WRITE_TOOL_TIMEOUT_SECONDS),
         function_tool(
-            accept_credit_deficit, needs_approval=True, timeout=WRITE_TOOL_TIMEOUT_SECONDS
+            accept_credit_deficit, needs_approval=False, timeout=WRITE_TOOL_TIMEOUT_SECONDS
         ),
-        function_tool(adjust_lesson, needs_approval=True, timeout=WRITE_TOOL_TIMEOUT_SECONDS),
+        function_tool(adjust_lesson, needs_approval=False, timeout=WRITE_TOOL_TIMEOUT_SECONDS),
     ]
     return Agent(
         name="LeetCode Coach",

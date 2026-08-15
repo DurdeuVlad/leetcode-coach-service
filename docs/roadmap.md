@@ -70,6 +70,10 @@ markup or fabricated state.
       `entrypoint.sh` runs migrations on the fresh database and starts
       the app.
 - [ ] Set `DATABASE_URL` in Coolify to the fresh Postgres database.
+- [ ] Run the evidence-gated
+      [`production verification prompt`](./production-verification-prompt.md)
+      with the independently known expected production SHA; record the resulting
+      SHA chain and safety attestations.
 - [ ] Verify the webhook is registered and `/health` returns
       `{"status":"ok"}` against the production URL.
 

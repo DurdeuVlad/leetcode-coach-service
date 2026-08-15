@@ -5,12 +5,13 @@ name: CI
 # and only `master` deploys to the homelab. CI runs on:
 #   - any PR targeting dev (external contributors + maintainer's own PRs)
 #   - any push to dev (catch breakage before merge-to-master)
-#   - any push to master (runs before the deploy job in deploy.yml)
+#   - a reusable call from deploy.yml for master releases
 on:
   push:
-    branches: [master, dev]
+    branches: [dev]
   pull_request:
     branches: [dev]
+  workflow_call: {}
 
 permissions:
   contents: read

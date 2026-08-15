@@ -9,8 +9,22 @@ permissions:
   contents: read
 
 jobs:
+  release-ref:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require the master release ref
+        run: |
+          if [ "$GITHUB_REF" != "refs/heads/master" ]; then
+            echo "::error::Production deploys require refs/heads/master; got $GITHUB_REF."
+            exit 1
+          fi
+
+  ci:
+    uses: ./.github/workflows/ci.yml
+
   deploy:
     name: Trigger Coolify Auto-Deploy
+    needs: [release-ref, ci]
     runs-on: self-hosted
     environment: production
     steps:

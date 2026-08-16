@@ -44,6 +44,8 @@ the matching review is known. Otherwise call get_problem to verify the exact can
 slug and use commit_canonical_attempt. Never refuse to record verified work solely
 because the queue or eligible pool is empty. If canonical identity cannot be verified,
 ask for the problem slug or LeetCode URL instead of guessing.
+When the user explicitly gives when the work happened, pass attempted_on as "today",
+"yesterday", or an ISO-8601 calendar date. Do not invent an attempt date.
 When creating a lesson use lesson_id=null with a title and category; use a positive
 numeric lesson_id only when get_learning_profile returned that existing database ID.
 If the user explicitly asks to consult Sol and escalation is allowed, call
@@ -402,8 +404,12 @@ def create_terra_agent(settings: AgentSettings | None = None) -> Any:
         outcome: Literal["solved", "reviewed"],
         feedback: str,
         lesson_delta: LessonDelta,
+        attempted_on: str | None = None,
     ) -> dict[str, Any]:
-        """Persist verified work for an exact canonical problem immediately."""
+        """Persist verified work for an exact canonical problem immediately.
+
+        attempted_on accepts today, yesterday, or an ISO-8601 calendar date.
+        """
         if ctx.context.operation_key is None:
             raise RuntimeError("canonical attempt requires a Telegram message operation key")
         result = await ctx.context.write(
@@ -414,6 +420,7 @@ def create_terra_agent(settings: AgentSettings | None = None) -> Any:
                 feedback=feedback[:2_000],
                 lesson_delta=lesson_delta.payload(),
                 operation_key=ctx.context.operation_key,
+                attempted_on=attempted_on,
             )
         )
         receipt = result.get("receipt")

@@ -1,4 +1,5 @@
 import asyncio
+import datetime as dt
 from collections import defaultdict
 from decimal import Decimal
 from types import SimpleNamespace
@@ -26,6 +27,7 @@ from leetcode_coach.runtime.adapters import (
     PostgresAgentSession,
     SQLCoachDomainAdapter,
     SQLRunStateRepository,
+    _parse_attempted_on,
 )
 
 
@@ -175,6 +177,17 @@ async def test_empty_queue_canonical_attempt_adapter_replay_is_a_no_op(v2_engine
             session.get(V2Problem, "longest-substring-without-repeating-characters").times_attempted
             == 1
         )
+
+
+def test_direct_canonical_attempt_date_parser_accepts_yesterday_and_rejects_invalid_dates():
+    yesterday = dt.date.today() - dt.timedelta(days=1)
+
+    assert _parse_attempted_on("yesterday") == yesterday
+    assert _parse_attempted_on(yesterday.isoformat()) == yesterday
+    with pytest.raises(
+        Exception, match="attempt date must be today, yesterday, or an ISO-8601 date"
+    ):
+        _parse_attempted_on("last Tuesday")
 
 
 @pytest.mark.asyncio

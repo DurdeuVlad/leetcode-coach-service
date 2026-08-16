@@ -119,6 +119,57 @@ def test_canonical_attempt_without_review_rewards_real_work(session):
     assert domain.credit_balance(100) == Decimal("1.00")
 
 
+def test_canonical_attempt_preserves_an_explicit_historical_date(session):
+    domain = CoachDomain(session)
+    yesterday = dt.date.today() - dt.timedelta(days=1)
+
+    attempt = domain.commit_canonical_attempt(
+        100,
+        "two-sum",
+        "solved",
+        operation_key="call-yesterday",
+        attempted_on=yesterday,
+    )
+
+    problem = session.get(V2Problem, "two-sum")
+    assert attempt.attempted_on == yesterday
+    assert problem.last_attempted == yesterday
+
+
+def test_historical_canonical_attempt_does_not_move_last_attempted_backward(session):
+    domain = CoachDomain(session)
+    problem = session.get(V2Problem, "two-sum")
+    problem.last_attempted = dt.date.today()
+    yesterday = dt.date.today() - dt.timedelta(days=1)
+
+    domain.commit_canonical_attempt(
+        100,
+        "two-sum",
+        "solved",
+        operation_key="call-yesterday-after-today",
+        attempted_on=yesterday,
+    )
+
+    assert problem.last_attempted == dt.date.today()
+
+
+def test_canonical_attempt_rejects_future_date_without_mutation(session):
+    domain = CoachDomain(session)
+    tomorrow = dt.date.today() + dt.timedelta(days=1)
+
+    with pytest.raises(DomainError, match="attempt date cannot be in the future"):
+        domain.commit_canonical_attempt(
+            100,
+            "two-sum",
+            "solved",
+            operation_key="call-tomorrow",
+            attempted_on=tomorrow,
+        )
+
+    assert session.get(V2Problem, "two-sum").times_attempted == 0
+    assert session.exec(select(V2Attempt)).all() == []
+
+
 def test_canonical_attempt_closes_oldest_matching_open_review_only(session):
     domain = CoachDomain(session)
     first = V2PendingReview(chat_id=100, problem_slug="two-sum")

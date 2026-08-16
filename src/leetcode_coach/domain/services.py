@@ -170,10 +170,13 @@ class CoachDomain:
         lesson_delta: dict[str, Any] | None = None,
         *,
         operation_key: str,
+        attempted_on: dt.date | None = None,
     ) -> V2Attempt | dict[str, bool]:
         """Persist verified work for an exact canonical slug, with or without a queue."""
         if outcome not in {"solved", "reviewed"}:
             raise DomainError("outcome must be solved or reviewed")
+        if attempted_on is not None and attempted_on > dt.date.today():
+            raise DomainError("attempt date cannot be in the future")
         problem = self.session.get(V2Problem, problem_slug)
         if problem is None:
             raise NotFound("canonical problem not found")
@@ -202,6 +205,7 @@ class CoachDomain:
             lesson_delta,
             review=review,
             credit_idempotency_key=idempotency_key,
+            attempted_on=attempted_on,
         )
 
     def _persist_attempt(
@@ -214,19 +218,22 @@ class CoachDomain:
         *,
         review: V2PendingReview | None,
         credit_idempotency_key: str | None = None,
+        attempted_on: dt.date | None = None,
     ) -> V2Attempt:
         """Apply the shared attempt, lesson, and credit transaction."""
         if review is not None:
             review.status = ReviewStatus.DONE
             review.updated_at = utcnow()
+        attempt_date = attempted_on or dt.date.today()
         problem.times_attempted += 1
-        problem.last_attempted = dt.date.today()
+        problem.last_attempted = max(problem.last_attempted or attempt_date, attempt_date)
         if outcome == "solved":
             problem.solved = True
         attempt = V2Attempt(
             chat_id=chat_id,
             review_id=review.id if review is not None else None,
             problem_slug=problem.slug,
+            attempted_on=attempt_date,
             outcome=outcome,
             feedback=feedback,
         )

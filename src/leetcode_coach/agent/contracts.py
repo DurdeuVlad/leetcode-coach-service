@@ -64,6 +64,7 @@ class CoachDomain(Protocol):
         feedback: str,
         lesson_delta: JsonObject,
         operation_key: str,
+        attempted_on: str | None = None,
     ) -> JsonObject: ...
 
     async def skip_problem(self, *, chat_id: int, review_id: str) -> JsonObject: ...

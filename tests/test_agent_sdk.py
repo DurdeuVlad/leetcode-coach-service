@@ -70,6 +70,7 @@ def test_terra_agent_has_bounded_model_and_expected_tools() -> None:
     assert "ask for the problem slug or LeetCode URL" in CACHEABLE_TERRA_CONTEXT
     assert "use commit_canonical_attempt" in CACHEABLE_TERRA_CONTEXT
     assert "operation_key" not in str(tools["commit_canonical_attempt"].params_json_schema)
+    assert "attempted_on" in tools["commit_canonical_attempt"].params_json_schema["properties"]
     assert tools["get_problem"].timeout_seconds == CANONICAL_LOOKUP_TIMEOUT_SECONDS == 70
     assert tools["get_progress"].timeout_seconds != CANONICAL_LOOKUP_TIMEOUT_SECONDS
 
@@ -92,8 +93,11 @@ async def test_attempt_tool_captures_receipt_out_of_band() -> None:
         "replayed": False,
     }
 
+    observed = {}
+
     class FakeDomain:
         async def commit_canonical_attempt(self, **kwargs):
+            observed.update(kwargs)
             return {"problem_slug": kwargs["problem_slug"], "receipt": receipt}
 
     context = AgentRuntimeContext(
@@ -112,6 +116,7 @@ async def test_attempt_tool_captures_receipt_out_of_band() -> None:
             "outcome": "solved",
             "feedback": "passed",
             "lesson_delta": {"lesson_id": None},
+            "attempted_on": "yesterday",
         }
     )
     await tool.on_invoke_tool(
@@ -125,6 +130,7 @@ async def test_attempt_tool_captures_receipt_out_of_band() -> None:
     )
 
     assert context.receipts == [receipt]
+    assert observed["attempted_on"] == "yesterday"
 
 
 @pytest.mark.asyncio

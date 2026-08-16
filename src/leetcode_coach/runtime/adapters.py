@@ -56,6 +56,20 @@ def _clip(value: Any, limit: int) -> str:
     return text if len(text) <= limit else f"{text[: limit - 1]}…"
 
 
+def _parse_attempted_on(value: str | None) -> dt.date | None:
+    if value is None or not value.strip():
+        return None
+    normalized = value.strip().casefold()
+    if normalized == "today":
+        return dt.date.today()
+    if normalized == "yesterday":
+        return dt.date.today() - dt.timedelta(days=1)
+    try:
+        return dt.date.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError("attempt date must be today, yesterday, or an ISO-8601 date") from exc
+
+
 def _money(value: Decimal, *, signed: bool = False) -> str:
     amount = value.quantize(Decimal("0.01"))
     return f"{amount:+.2f}" if signed else f"{amount:.2f}"
@@ -386,7 +400,10 @@ class SQLCoachDomainAdapter:
         feedback: str,
         lesson_delta: JsonObject,
         operation_key: str,
+        attempted_on: str | None = None,
     ) -> JsonObject:
+        parsed_attempted_on = _parse_attempted_on(attempted_on)
+
         def commit(session: Session):
             problem = session.get(V2Problem, problem_slug)
             domain = SyncCoachDomain(session)
@@ -398,6 +415,7 @@ class SQLCoachDomainAdapter:
                 feedback,
                 lesson_delta,
                 operation_key=operation_key,
+                attempted_on=parsed_attempted_on,
             )
             replayed = isinstance(result, dict) and result.get("replayed") is True
             queued = getattr(result, "review_id", None) is not None

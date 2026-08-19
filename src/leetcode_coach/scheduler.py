@@ -16,6 +16,7 @@ from leetcode_coach.config import get_settings
 from leetcode_coach.db.base import create_db_engine
 from leetcode_coach.jobs import (
     apply_daily_tax,
+    deliver_due_follow_ups,
     expire_state,
     queue_refill,
     refresh_problem_pool,
@@ -58,7 +59,7 @@ def _schema_ready(engine: Engine) -> bool:
         with engine.connect() as connection:
             return (
                 connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-                == "v2_0001"
+                == "v2_0002"
             )
     except Exception:
         return False
@@ -73,6 +74,12 @@ def _build_scheduler(timezone: str) -> AsyncIOScheduler:
         queue_refill, CronTrigger(hour=9, minute=5, timezone=timezone), id="v2_queue_refill"
     )
     scheduler.add_job(send_nudge, CronTrigger(hour=20, minute=0, timezone=timezone), id="v2_nudge")
+    scheduler.add_job(
+        deliver_due_follow_ups,
+        CronTrigger(minute="*", timezone=timezone),
+        id="v2_follow_ups",
+        max_instances=1,
+    )
     scheduler.add_job(
         expire_state, CronTrigger(hour=22, minute=0, timezone=timezone), id="v2_expiry"
     )

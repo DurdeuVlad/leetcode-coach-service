@@ -24,7 +24,6 @@ from leetcode_coach.application import CoachApplication
 from leetcode_coach.config import get_settings
 from leetcode_coach.db.base import create_db_engine
 from leetcode_coach.db.models import (
-    ApprovalStatus,
     Difficulty,
     ProposalStatus,
     ReviewStatus,
@@ -32,7 +31,6 @@ from leetcode_coach.db.models import (
     V2Attempt,
     V2CreditLedger,
     V2Lesson,
-    V2PendingApproval,
     V2PendingReview,
     V2Problem,
     V2ProcessedUpdate,
@@ -127,31 +125,6 @@ async def _prompt(app: CoachApplication, chat_id: int, message_id: int, text: st
     )
 
 
-def _pending(engine) -> list[V2PendingApproval]:
-    with Session(engine) as session:
-        return list(
-            session.exec(
-                select(V2PendingApproval).where(V2PendingApproval.status == ApprovalStatus.PENDING)
-            ).all()
-        )
-
-
-async def _approve_one_after_restart(engine, chat_id: int) -> None:
-    rows = _pending(engine)
-    assert len(rows) == 1, [(row.action, row.summary) for row in rows]
-    row = rows[0]
-    assert row.approval_message_id is not None
-    restarted = CoachApplication(engine)
-    print(f"\nRESTART + USER reply-to {row.approval_message_id}: yes")
-    await restarted.handle_text(
-        chat_id=chat_id,
-        text="yes",
-        message_id=90_000 + row.approval_message_id,
-        reply_to_message_id=row.approval_message_id,
-    )
-    assert not _pending(engine)
-
-
 async def _run() -> None:
     for stream in (sys.stdout, sys.stderr):
         with suppress(AttributeError, OSError):
@@ -201,7 +174,9 @@ async def _run() -> None:
         assert "number-of-islands" in slugs and "decode-ways" in slugs
         assert "house-robber" not in slugs
         assert batch.telegram_message_id is not None
-    proposal_message = transcript.messages[-1]
+    proposal_message = next(
+        message for message in reversed(transcript.messages) if message.get("parse_mode") == "HTML"
+    )
     assert proposal_message["parse_mode"] == "HTML"
     assert "\\." not in proposal_message["text"] and "\\-" not in proposal_message["text"]
 
@@ -220,8 +195,6 @@ async def _run() -> None:
         3,
         "I choose Number of Islands and Decode Ways from today's proposal. Commit both picks.",
     )
-    assert _pending(engine)[0].action == "commit_picks"
-    await _approve_one_after_restart(engine, chat_id)
     with Session(engine) as session:
         reviews = session.exec(select(V2PendingReview).order_by(V2PendingReview.id)).all()
         assert len(reviews) == 2 and all(review.telegram_message_id for review in reviews)
@@ -256,8 +229,6 @@ async def _run() -> None:
         "invariant, complexity, and risks, then record its open review as solved with "
         f"useful feedback and a new lesson if warranted.\n\n{java}",
     )
-    assert _pending(engine)[0].action == "commit_attempt"
-    await _approve_one_after_restart(engine, chat_id)
     with Session(engine) as session:
         assert _count(session, V2Attempt) == 1
         assert _count(session, V2Lesson) == 1
@@ -289,17 +260,10 @@ async def _run() -> None:
         app,
         chat_id,
         5,
-        "Create a new active lesson titled 'Rejected proof lesson' in category testing. "
-        "Use adjust_lesson, but wait for my approval.",
-    )
-    rejection = _pending(engine)[0]
-    await app.handle_callback(
-        chat_id=chat_id,
-        callback_id="reject",
-        data=f"v2a:{rejection.id}:no",
+        "Create a new active lesson titled 'Autonomy proof lesson' in category testing now.",
     )
     with Session(engine) as session:
-        assert _count(session, V2Lesson) == lessons_before
+        assert _count(session, V2Lesson) == lessons_before + 1
 
     await _prompt(
         app,
@@ -346,17 +310,29 @@ async def _run() -> None:
         extended = session.get(V2ProposalBatch, extension_batch_id)
         assert extended is not None and extended.status == ProposalStatus.OPEN
 
-    batches_before_refill: int
-    with Session(engine) as session:
-        batches_before_refill = _count(session, V2ProposalBatch)
+    messages_before_morning = len(transcript.messages)
     await jobs_module.queue_refill()
+    assert len(transcript.messages) > messages_before_morning
     with Session(engine) as session:
-        assert _count(session, V2ProposalBatch) == batches_before_refill + 1
-        refill = session.exec(select(V2ProposalBatch).order_by(V2ProposalBatch.id.desc())).first()
-        assert refill is not None and refill.telegram_message_id is not None
+        refill, _ = CoachDomain(session).create_proposal(
+            chat_id,
+            [
+                ProposalSelection("house-robber", "practice DP", "write the recurrence"),
+                ProposalSelection("course-schedule", "practice graphs", "track indegrees"),
+            ],
+        )
+        session.commit()
         refill_id = refill.id
+    await app._send_unsent_proposal(chat_id)
     await app.handle_callback(chat_id=chat_id, callback_id="pick-one", data=f"v2p:{refill_id}:1")
     await app.handle_callback(chat_id=chat_id, callback_id="pick-two", data=f"v2p:{refill_id}:2")
+    await app.handle_callback(chat_id=chat_id, callback_id="pick-done", data=f"v2pd:{refill_id}")
+    with Session(engine) as session:
+        picked_reviews = session.exec(
+            select(V2PendingReview).where(V2PendingReview.batch_id == refill_id)
+        ).all()
+        assert len(picked_reviews) == 2
+        assert all(review.telegram_message_id is not None for review in picked_reviews)
 
     await jobs_module.apply_daily_tax()
     await jobs_module.apply_daily_tax()
@@ -452,7 +428,9 @@ async def _run() -> None:
         assert _count(session, V2ProcessedUpdate) == 3
         assert _count(session, V2CreditLedger) >= 4
         runs = session.exec(select(V2AgentRun)).all()
-        assert runs and all(run.turn_count <= 8 for run in runs)
+        attempt_count = _count(session, V2Attempt)
+        lesson_count = _count(session, V2Lesson)
+        assert runs and all(run.turn_count <= 16 for run in runs)
         assert any(run.cache_read_tokens > 0 for run in runs)
         assert all(run.tool_calls > 0 for run in runs)
 
@@ -463,8 +441,8 @@ async def _run() -> None:
                 "messages": len(transcript.messages),
                 "edits": len(transcript.edits),
                 "agent_runs": len(runs),
-                "attempts": 1,
-                "lessons": lessons_before,
+                "attempts": attempt_count,
+                "lessons": lesson_count,
             },
             sort_keys=True,
         ),

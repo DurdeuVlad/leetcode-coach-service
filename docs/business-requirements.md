@@ -38,6 +38,14 @@ the bot."
 
 ### FR-1 — Daily candidate proposal (Flow A)
 
+> **Superseded by Agentic V2 (2026-08-16):** FR-1.1 through FR-1.4 and
+> FR-1.7 no longer constrain current behavior. Proposals contain one or more
+> coach-chosen problems; there is no exact-five, difficulty-mix, eligibility,
+> solved-state, or pre-populated-pool gate. Exact slug/URL normalization and
+> deterministic paginated Telegram rendering remain code-enforced. A mechanical
+> maximum of 20 candidates keeps the controller keyboard Telegram-safe; it is not
+> a pedagogical proposal-count rule.
+
 - **FR-1.1** Once per day at 09:05 Europe/Bucharest, the system proposes **5 candidate
   problems** to the user via Telegram.
 - **FR-1.2** The 5 candidates must be drawn from the **unsolved problem pool**
@@ -89,6 +97,10 @@ the bot."
 - **FR-2.3** Pick-parse path: parse the reply as ≤2 numbers (regex, no LLM),
   map to the 5-candidate list, cap at 2 chosen problems. Empty/invalid →
   short "no valid picks" message, log nothing.
+
+  **Superseded by Agentic V2 (2026-08-16):** the current callback flow toggles
+  any number of candidate selections and commits them with **Done**. The
+  historical two-pick cap does not apply.
 - **FR-2.4** For each chosen problem, in order:
   1. Send an individual Telegram message ("Problem 1/2: ...") including the
      `coaching_hint`. Capture its `message_id`.

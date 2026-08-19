@@ -55,9 +55,9 @@ def session():
         yield db
 
 
-def test_draft_hydrates_canonical_metadata_and_rejects_wrong_house_robber_difficulty(session):
+def test_preview_hydrates_durable_metadata_without_enforcing_model_mix(session):
     domain = CoachDomain(session)
-    preview = domain.draft_proposal(
+    preview = domain.preview_proposal(
         [
             ProposalSelection("house-robber", "Model called it hard", "start at index 0"),
             ProposalSelection("three-sum"),
@@ -69,12 +69,12 @@ def test_draft_hydrates_canonical_metadata_and_rejects_wrong_house_robber_diffic
     assert preview.candidates[0].difficulty == "easy"
     assert preview.candidates[0].url == "https://lc/198"
     with pytest.raises(DomainError, match="duplicate"):
-        domain.draft_proposal([ProposalSelection("two-sum"), ProposalSelection("two-sum")])
-    with pytest.raises(DomainError, match="wrong proposal difficulty mix"):
-        domain.draft_proposal(
-            [ProposalSelection("house-robber"), ProposalSelection("two-sum")],
-            required_mix={"hard": 1, "easy": 1},
-        )
+        domain.preview_proposal([ProposalSelection("two-sum"), ProposalSelection("two-sum")])
+    flexible = domain.preview_proposal(
+        [ProposalSelection("house-robber"), ProposalSelection("two-sum")],
+        required_mix={"hard": 1, "easy": 1},
+    )
+    assert [item.difficulty for item in flexible.candidates] == ["easy", "easy"]
 
 
 def test_picks_attempts_credits_and_idempotency(session):
@@ -102,7 +102,7 @@ def test_empty_credit_balance_has_stable_two_decimal_representation(session):
 def test_canonical_attempt_without_review_rewards_real_work(session):
     domain = CoachDomain(session)
 
-    attempt = domain.commit_canonical_attempt(
+    attempt = domain.record_problem_attempt(
         100,
         "two-sum",
         "solved",
@@ -123,7 +123,7 @@ def test_canonical_attempt_preserves_an_explicit_historical_date(session):
     domain = CoachDomain(session)
     yesterday = dt.date.today() - dt.timedelta(days=1)
 
-    attempt = domain.commit_canonical_attempt(
+    attempt = domain.record_problem_attempt(
         100,
         "two-sum",
         "solved",
@@ -142,7 +142,7 @@ def test_historical_canonical_attempt_does_not_move_last_attempted_backward(sess
     problem.last_attempted = dt.date.today()
     yesterday = dt.date.today() - dt.timedelta(days=1)
 
-    domain.commit_canonical_attempt(
+    domain.record_problem_attempt(
         100,
         "two-sum",
         "solved",
@@ -157,8 +157,8 @@ def test_canonical_attempt_rejects_future_date_without_mutation(session):
     domain = CoachDomain(session)
     tomorrow = dt.date.today() + dt.timedelta(days=1)
 
-    with pytest.raises(DomainError, match="attempt date cannot be in the future"):
-        domain.commit_canonical_attempt(
+    with pytest.raises(DomainError, match="attempted_on cannot be in the future"):
+        domain.record_problem_attempt(
             100,
             "two-sum",
             "solved",
@@ -178,7 +178,7 @@ def test_canonical_attempt_closes_oldest_matching_open_review_only(session):
     session.add_all([first, second, other])
     session.flush()
 
-    attempt = domain.commit_canonical_attempt(
+    attempt = domain.record_problem_attempt(
         100, "two-sum", "reviewed", operation_key="call-matching-review"
     )
 
@@ -189,13 +189,39 @@ def test_canonical_attempt_closes_oldest_matching_open_review_only(session):
     assert domain.credit_balance(100) == Decimal("0.50")
 
 
+def test_correct_attempt_rescoring_replaces_prior_credit_not_adds_to_it(session):
+    domain = CoachDomain(session)
+
+    attempt = domain.record_problem_attempt(
+        100, "two-sum", "reviewed", operation_key="call-initial-review"
+    )
+    assert domain.credit_balance(100) == Decimal("0.50")
+
+    corrected = domain.correct_attempt(
+        100,
+        attempt.id,
+        outcome="solved",
+        attempted_on=None,
+        feedback=None,
+        language=None,
+        solution_summary=None,
+        time_spent_min=None,
+        reason="rescored after dispute",
+        operation_key="call-dispute-fix",
+    )
+
+    assert corrected.outcome == "solved"
+    assert len(session.exec(select(V2Attempt)).all()) == 1
+    assert domain.credit_balance(100) == Decimal("1.00")
+
+
 def test_canonical_attempt_accepts_already_solved_and_ineligible_problem(session):
     problem = session.get(V2Problem, "house-robber")
     problem.solved = True
     problem.eligible = False
     session.flush()
 
-    attempt = CoachDomain(session).commit_canonical_attempt(
+    attempt = CoachDomain(session).record_problem_attempt(
         100, "house-robber", "solved", operation_key="call-repeat-solved"
     )
 
@@ -207,12 +233,12 @@ def test_canonical_attempt_rejects_unknown_slug_and_invalid_outcome_without_muta
     domain = CoachDomain(session)
     problem = session.get(V2Problem, "two-sum")
 
-    with pytest.raises(DomainError, match="outcome must be solved or reviewed"):
-        domain.commit_canonical_attempt(
+    with pytest.raises(DomainError, match="invalid attempt outcome"):
+        domain.record_problem_attempt(
             100, "two-sum", "Solved", operation_key="call-invalid-outcome"
         )
-    with pytest.raises(Exception, match="canonical problem not found"):
-        domain.commit_canonical_attempt(
+    with pytest.raises(Exception, match="problem not found"):
+        domain.record_problem_attempt(
             100, "not-two-sum", "solved", operation_key="call-unknown-slug"
         )
 
@@ -221,20 +247,20 @@ def test_canonical_attempt_rejects_unknown_slug_and_invalid_outcome_without_muta
     assert domain.credit_balance(100) == Decimal("0.00")
 
 
-def test_canonical_attempt_operation_key_makes_approval_replay_idempotent(session):
+def test_canonical_attempt_operation_key_makes_replay_idempotent(session):
     domain = CoachDomain(session)
     lesson = V2Lesson(chat_id=100, title="Sliding windows", times_reinforced=1)
     session.add(lesson)
     session.flush()
     delta = {"lesson_id": lesson.id, "reinforcement_delta": 1, "status": "active"}
 
-    first = domain.commit_canonical_attempt(
+    first = domain.record_problem_attempt(
         100, "two-sum", "solved", lesson_delta=delta, operation_key="call-123"
     )
-    replay = domain.commit_canonical_attempt(
+    replay = domain.record_problem_attempt(
         100, "two-sum", "solved", lesson_delta=delta, operation_key="call-123"
     )
-    repeated_work = domain.commit_canonical_attempt(
+    repeated_work = domain.record_problem_attempt(
         100, "two-sum", "solved", lesson_delta=delta, operation_key="call-456"
     )
 
@@ -261,10 +287,10 @@ def test_canonical_attempt_operation_key_includes_slug(session):
     session.flush()
     domain = CoachDomain(session)
 
-    coin = domain.commit_canonical_attempt(
+    coin = domain.record_problem_attempt(
         100, "coin-change", "solved", operation_key="telegram-message-9"
     )
-    two_sum = domain.commit_canonical_attempt(
+    two_sum = domain.record_problem_attempt(
         100, "two-sum", "solved", operation_key="telegram-message-9"
     )
 
@@ -310,26 +336,8 @@ def test_repeatable_ordinary_writes_use_message_operation_key(session):
     assert len(session.exec(select(V2Lesson).where(V2Lesson.chat_id == 100)).all()) == 1
 
 
-def test_confirmation_requires_matching_reply_or_exactly_one_pending(session):
+def test_duplicate_update_is_safe(session):
     domain = CoachDomain(session)
-    first = domain.create_approval(100, "skip_problem", {"review_id": 1}, "Skip it")
-    assert domain.resolve_text_confirmation(100, "yes", None).id == first.id
-    second = domain.create_approval(100, "skip_problem", {"review_id": 2}, "Skip it")
-    third = domain.create_approval(100, "skip_problem", {"review_id": 3}, "Skip it")
-    assert domain.resolve_text_confirmation(100, "yes", None) is None
-    assert domain.resolve_text_confirmation(100, "yes", 999) is None
-    second.approval_message_id = 55
-    session.flush()
-    assert domain.resolve_text_confirmation(100, "no", 55).id == second.id
-    assert third.status.value == "pending"
-
-
-def test_expired_approval_and_duplicate_update_are_safe(session):
-    domain = CoachDomain(session)
-    approval = domain.create_approval(100, "pick", {}, "Pick")
-    approval.expires_at = dt.datetime.now(dt.UTC) - dt.timedelta(seconds=1)
-    session.flush()
-    assert domain.expire_approvals() == 1
     assert domain.record_update(123, 100) is True
     assert domain.record_update(123, 100) is False
 

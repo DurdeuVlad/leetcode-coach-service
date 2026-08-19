@@ -1,150 +1,75 @@
 # Agentic LeetCode Coach V2
 
-Status: canonical V2 contract and design | Owner: Vlad | Revised: 2026-08-03
+Status: active contract | Revised: 2026-08-16
 
-This document supersedes the marked V1 requirements, architecture, and roadmap
-sections. It deliberately replaces V1's “no LLM tool-calling loop” decision.
-The V1 documents and `n8n-reference/` remain historical evidence only.
+This document supersedes conflicting V1 behavioral and architecture rules. V1
+documents remain historical context, not constraints on the current agent.
 
-## Product boundary
+## Role and learning loop
 
-V2 remains a single-user Telegram coach, FastAPI service, PostgreSQL database,
-Alembic migration set, APScheduler scheduler, Docker deployment, and
-Europe/Bucharest operating timezone. It preserves daily proposals/refill,
-natural-language and button picks, coaching, lesson progression, status, hints,
-explanations, reattempts, follow-ups, credits, tax, nudges, expiry, and extend.
+One `gpt-5.6-terra` coach is practical, encouraging, honest, and focused on one
+learner's interview readiness. It assesses the profile and submitted work,
+chooses practice that targets weaknesses, reviews correctness, complexity, and
+reusable patterns, extracts or reinforces lessons, then adapts future work.
 
-Out of scope: multi-user support, web UI, Redis, Celery, task queues,
-multi-agent handoffs, Gemini/fallback providers, and model-generated Telegram
-HTML or Markdown.
+The prompt is a coaching brief, not a procedural workflow. Terra decides whether
+the useful next step is practice, review, explanation, memory, or follow-up. It
+may choose one or many problems, revisit solved work, and record user-reported
+work without a pre-existing queue. Empty catalog state or unavailable lookup does
+not veto an exact user-supplied LeetCode identity.
 
-## Controller and bounded execution
+Code owns only mechanical invariants: normalized exact slug/URL identity, atomic
+transactions, replay idempotency, per-chat isolation, deterministic escaped
+rendering, transport bounds, and bounded execution. Reads may run in parallel;
+writes are serialized. Terra has 16 turns by default and at most 32. It may call
+the tool-less, read-only Sol advisor once per run, including after a write.
 
-One `gpt-5.6-terra` agent controls each Telegram conversation through the
-OpenAI Agents SDK. Agent runs are serialized per chat and Telegram `update_id`
-delivery is idempotent. A run is limited to eight model turns, three concurrent
-read tools maximum, serial writes, bounded tool payloads, and explicit tool
-timeouts. Provider failures retry only when transient, then fail visibly; the
-system never fabricates a result or durable state.
+The volatile prompt suffix includes today's Europe/Bucharest date. Durable
+coaching memory stores versioned, bounded goals, preferences, availability,
+curriculum, mastery, and notes in bot state.
 
-Terra may call `ask_sol_advisor` once per run for difficult coaching,
-consequential ambiguity, repeated schema failure, or an explicit request. The
-tool makes exactly one read-only `gpt-5.6-sol` request and returns
-`recommendation`, `risks`, `missing_evidence`, and `suggested_next_action`.
-Its advice is untrusted. Sol receives no tools, cannot mutate state, cannot
-approve a write, and cannot resume a paused run. Escalation is forbidden after
-a write starts or while an approval is pending.
+## Tools and state
 
-Use explicit prompt caching for Terra's stable instructions and tool schemas;
-place chat, profile, and tool-result data after the cache breakpoint. Record
-model, turns, tool calls, latency, cache reads/writes, input/output tokens,
-and Sol escalation reason for every run.
+Reads include profile, flexible catalog search (`eligible_unsolved`, `solved`,
+`ineligible`, or `all`), exact problem lookup, queue, progress, coaching memory,
+attempt history, and follow-ups. `start_problem` atomically inserts missing exact
+metadata when supplied and creates—or replays—the existing open review.
 
-## Canonical data and rendering
+Writes include `publish_practice_set`, picks, attempts, lessons, memory updates,
+attempt correction/reversal, and follow-up scheduling/cancellation. They execute
+immediately through the per-chat write lock. There is no live approval, yes/no,
+resume, or persisted SDK interruption flow. Historical approval tables may remain
+in an old database but are inert.
 
-PostgreSQL caches canonical problem slug, title, URL, tags, difficulty, solved
-state, and eligibility. On an exact-slug miss, `get_problem` accepts that slug or
-an exact `leetcode.com/problems/{slug}` URL, makes one bounded Browserless lookup,
-requires an exact returned slug, and caches only LeetCode-supplied metadata. It does
-not search by title or accept model-supplied metadata. On-demand imports start with
-`eligible=false`, so a one-off solved problem cannot enter the proposal pool. The
-model may choose slugs and provide teaching text;
-code hydrates all displayed metadata. Reject unknown, duplicate, solved,
-ineligible, wrong-mix, or model-invented selections before persistence or
-Telegram output. `House Robber` is canonical easy and must never be stored or
-shown as hard.
+`publish_practice_set` accepts 1–20 candidates. Twenty is a mechanical Telegram
+controller limit, not a pedagogical mix or count rule. No eligibility, solved-state,
+difficulty-mix, exact-five, or open-review policy gates the coach. Informational
+proposal pages are sent at least once under Telegram's 4,096-character limit;
+active selection controls appear only after all pages. Callback identities make
+toggle replay stable, and Done resumes any missing review deliveries.
 
-Models return plain text or typed data only. Code renders proposal cards as
-deterministic escaped HTML and uses a dedicated renderer where code needs HTML;
-ordinary conversation is plain text. No user sees MarkdownV2 escape artifacts.
+Attempts support `solved` (1 credit), `reviewed` (0.5), `saw_solution` (0.25),
+`attempted` (0), and `skipped` (0), plus language, time, solution summary,
+feedback, and today/past effective date. `attempted` leaves its review open.
+Corrections and reversals append revisions and compensating ledger entries, then
+recompute problem aggregates from the migration baseline and active attempts.
+`solved` remains true when externally verified or any active solved attempt exists.
 
-## Tools and durable actions
+Follow-ups persist Bucharest wall times as UTC. The scheduler checks each minute
+and delivers at least once; a crash after Telegram accepts a send but before the
+database checkpoint can duplicate that message. Morning coaching runs
+unconditionally and lets Terra decide what action is useful.
 
-Read tools are narrowly typed: `get_learning_profile`, `search_problem_pool`,
-`get_problem`, `get_open_queue`, `get_progress`, `get_walkthroughs`,
-`draft_proposal`, and `ask_sol_advisor`. `draft_proposal` validates selection
-and required difficulty mix, hydrates canonical fields, and produces the
-deterministic preview. Persisting that preview as an unsent proposal batch is
-pre-authorized operational staging, not a user-learning or outcome mutation.
-`get_walkthroughs` remains a bounded empty result until a first-party tutorial
-source is adopted. Canonical refresh and exact-slug read-through use the existing
-Browserless-mediated LeetCode integration and reject non-exact slug matches.
+Hint and Why buttons invoke Terra. Hints progress replay-safely from conceptual,
+to invariant/next step, to pseudocode. Callback replay does not advance the level.
 
-Write tools are atomic domain operations and accept identifiers plus confirmed
-outcomes, never model-supplied problem metadata: `commit_picks`,
-`commit_attempt`, `commit_canonical_attempt`, `skip_problem`, `mark_solution_viewed`, `reattempt_problem`,
-`extend_proposal`, `accept_credit_deficit`, and `adjust_lesson`.
+## Migration and proof
 
-All ordinary coaching write tools execute immediately on an explicit user request;
-they do not pause in SDK approval state. Deterministic domain validation still rejects
-stale, unknown, ineligible, or otherwise invalid operations. The initial Telegram
-message ID is an internal operation key. Review
-attempt keys include the review ID, while canonical attempt keys include the slug,
-so replay is harmless and two distinct solved slugs in one message are each recorded
-once. Proposal picks, skip/view transitions, reattempts, and deficit acceptance are
-naturally idempotent through status or existing domain keys. Proposal extension and
-lesson adjustment use message-scoped operation guards because repeating them would
-otherwise mutate state twice. The key is never exposed to the model.
+`v2_0002` widens bot state, adds attempt metadata/reversal/audit state, preserves
+problem aggregate baselines, links credit entries to attempts, and adds durable
+follow-ups. Deployment remains FastAPI + PostgreSQL + APScheduler in
+Europe/Bucharest; Redis, Celery, workers, multi-user support, and a web UI remain
+out of scope.
 
-`commit_canonical_attempt` records verified work against any exact canonical slug,
-including already-solved or currently ineligible problems. It closes and links the
-oldest matching open review when one exists; otherwise it creates an attempt without
-a review. It never fabricates a proposal or queue item. The agent must verify the
-slug with `get_problem`, ask for a slug or LeetCode URL when identity is unclear, and
-must not refuse verified work merely because the queue or eligible pool is empty.
-Replaying the same Telegram operation for the same slug is a no-op; a separately
-reported attempt remains valid even for the same canonical problem.
-
-Every attempt write also produces a deterministic plain-text work receipt from
-facts read inside the write transaction: canonical title, recorded result, earned
-credit, before/after balance, and either `Open queue` or
-`Direct attempt (no queue needed)`. The runtime carries these facts outside the
-model transcript and sends receipts in attempt order before Terra's coaching text.
-A replay says `Already recorded`, earns `+0.00`, and shows the unchanged current
-balance; Terra's final text is coaching-only and does not restate receipt facts.
-
-Legacy paused approvals remain readable during rollout, but any fresh user instruction
-supersedes the obsolete paused run and expires its pending controls without executing
-them. Unsent proposal or review delivery never preempts a fresh instruction or hides
-its result. Explicit action buttons continue to execute their exact deterministic
-operation. Scheduled tax, expiry, operational state, conversation storage, and
-idempotency records are pre-authorized system work.
-
-## Schema and migration
-
-V2 uses a fresh database/schema: canonical problems, attempts, lessons,
-proposal batches, pending reviews, credit ledger, bot state, processed Telegram
-updates, conversation items, agent runs, and pending approvals. The migration
-imports only canonical LeetCode problems, attempt history, and tutor lessons.
-It drops V1 callback tokens, proposals, reviews, agent/runtime state, and all
-operational records; V2 credit balance begins at zero. Tests compare source and
-target counts and representative records while proving excluded data is absent.
-
-## Scheduler, deployment, and cutover
-
-APScheduler owns scheduled work in Europe/Bucharest. V2 uses the existing
-FastAPI, Telegram, PostgreSQL, Alembic, Docker topology, with one scheduler
-leader guarded by PostgreSQL. Validate locally with the terminal simulator,
-real-model proof harness, and request-level Telegram Bot API contract tests;
-staging is outside the current delivery scope. Before production cutover, verify the deployed SHA: raw
-MarkdownV2 output despite the current HTML fix means stale deployment.
-
-Import learning data into a fresh V2 production database, switch the webhook,
-then enable the scheduler. Keep V1 service/database read-only for seven days as
-rollback, then remove them only after a stable observability review.
-
-## Acceptance requirements
-
-- Model-supplied hard `House Robber` is canonicalized as easy or rejected by
-  mix validation; invented metadata never reaches storage or Telegram.
-- Approval, rejection, contextual yes/no, ambiguous text, expiry, restart,
-  stale callback, and duplicate update behavior are deterministic.
-- Rejected/expired writes leave domain state unchanged; replayed updates never
-  repeat writes.
-- Attempt receipts use authoritative transactional facts, preserve multi-attempt
-  order, precede coaching, and show replay as zero new credit at the current balance.
-- Terra calls Sol no more than once; Sol has no write path or approval bypass.
-- Cache telemetry, max turns, timeouts, malformed tool input, provider outage,
-  and partial Telegram failure are tested and fail loudly.
-- End-to-end tests cover proposal → pick → coach → lesson → credits plus skip,
-  saw solution, reattempt, nudge, expiry, and extend.
+Automated tests are the current evidence for this autonomy release. The paid
+real-model proof has not been rerun; `docs/live-proof.md` records that boundary.

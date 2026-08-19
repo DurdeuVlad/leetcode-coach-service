@@ -24,7 +24,7 @@ production infrastructure.
 - [x] Create the Alembic schema and domain services for canonical
       problems, attempts, lessons, proposal batches, reviews, credit
       ledger, bot state, Telegram idempotency, conversation items, agent
-      runs, and pending approvals.
+      runs, durable coaching memory, attempt revisions, and follow-ups.
 - [x] Implement deterministic HTML proposal and plain-text/code-safe
       renderers.
 - [x] Implement a migration command that imports only canonical problems,
@@ -36,32 +36,49 @@ production infrastructure.
 **Exit criteria:** migration count/representative tests pass; canonical
 metadata is the only metadata persisted or rendered.
 
-## 3. Agent runner, tools, approvals, and Telegram adapter
+## 3. Autonomous agent runner, tools, and Telegram adapter
 
 - [x] Implement a serialized per-chat Agents SDK runner using Terra,
-      bounded to eight turns and three concurrent read tools.
-- [x] Add typed read tools, serial write tools, PostgreSQL run state,
-      approval persistence/resume/expiry, and duplicate-update protection.
+      bounded to 16 turns by default (32 maximum) and three concurrent reads.
+- [x] Add typed parallel reads, serial immediate writes, fresh-run conversation
+      state, and duplicate-update protection. Live approval/resume is removed.
 - [x] Add the read-only, once-per-run Terra-to-Sol advisor tool and
       telemetry.
 
-**Exit criteria:** approval, restart/resume, stale callback, idempotency,
-tool validation, and Sol-bound tests pass.
+**Exit criteria:** immediate-write, callback replay, idempotency, tool validation,
+and Sol-bound tests pass.
 
 ## 4. Scheduling and feature parity
 
 - [x] Rebuild proposal/refill, coaching, lessons, credits/tax, nudges,
       expiry, extension, status, hints, explanations, reattempts, and
       follow-ups on the domain layer.
-- [x] Run the terminal/live real-model suite against SQLite and
-      PostgreSQL.
+- [ ] Re-run the terminal/live real-model suite against SQLite and PostgreSQL
+      for the 2026-08-16 autonomy release. The earlier V1 proof does not verify
+      the current behavior.
 - [x] Validate the Telegram adapter locally against the official Bot API
       contract, including webhook authentication, HTML/entity limits,
       callback byte limits, edit/answer methods, retries, and duplicate
       updates.
+- [x] Replace the controller's procedural rulebook with a lean coaching role,
+      personality, and curriculum playbook. Move only mechanical integrity
+      invariants into code.
+- [x] Allow exact agent-supplied problem identity metadata for atomic recording
+      and proposals when the local registry is empty or lookup is unavailable.
+- [x] Support today/past attempt dates and flexible proposal/pick counts without
+      rigid pool, mix, eligibility, solved-state, or open-review caps.
+- [x] Add callback-idempotent toggle + Done selection and checkpointed at-least-once
+      informational pagination under Telegram's 4,096-visible-character limit.
+- [x] Enforce the mechanical 20-candidate Telegram controller limit in tool schemas
+      and before database writes.
+- [x] Add exact `start_problem`, flexible catalog modes, durable coaching memory,
+      rich attempt history/correction/reversal, and UTC-backed follow-ups.
+- [x] Make morning coaching unconditional and Hint/Why Terra-driven with
+      progressive replay-safe hint levels.
 
-**Exit criteria:** all acceptance scenarios pass without model-generated
-markup or fabricated state.
+**Exit criteria:** automated acceptance scenarios pass without model-generated
+markup or fabricated state. The 2026-08-16 flexibility repair is automated-test
+verified only; the updated live-model proof remains pending.
 
 ## 5. Cutover
 
@@ -81,8 +98,8 @@ markup or fabricated state.
 
 ## Guiding principles
 
-- **Port the spec, don't redesign it.** Prompts carry over verbatim. Flow
-  logic carries over as functions. The only redesign is the runtime.
+- **Coach by outcome, not choreography.** Keep the prompt focused on role,
+  personality, and the learning loop. Enforce only mechanical integrity in code.
 - **Each phase ends with a working thing on the homelab.** No phase is
   "scaffold only." If a phase can't be deployed, it's too big.
 - **Tests come with the code, not after.** The coach pass prompt is the

@@ -24,8 +24,7 @@ operating rules, and the gotchas you'll hit.
 - **DB:** PostgreSQL via SQLModel + Alembic
 - **LLM:** OpenAI Agents SDK: `gpt-5.6-terra` controller with an optional,
   one-shot read-only `gpt-5.6-sol` advisor; no provider fallback
-- **Integrations:** Telegram Bot API, PostgreSQL canonical problem data, and
-  bounded walkthrough lookup
+- **Integrations:** Telegram Bot API and PostgreSQL canonical problem data
 - **Deploy:** Docker → Coolify on a homelab
 - **Tests:** pytest, pytest-asyncio, testcontainers-postgres, respx
 
@@ -54,7 +53,7 @@ curl localhost:8000/health   # -> {"status":"ok", ...}
 Or run `docker compose up` for the app and Postgres together. Exercise the
 real Terra loop locally with `uv run coach-terminal`; use
 `/callback <callback_data>` to press a printed button and
-`/reply <bot_message_id> yes|no` to test contextual approvals. This
+`/reply <bot_message_id> <text>` to test contextual replies. This
 simulator uses the configured OpenAI key and database but does not call
 Telegram.
 

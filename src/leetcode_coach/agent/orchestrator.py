@@ -3,22 +3,29 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
-import json
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 from agents import RunContextWrapper
+from pydantic import Field
+
+from leetcode_coach.clock import local_today
 
 from .advisor import SolAdvice, SolAdvisor
-from .contracts import CoachDomain, RunStateRepository
-from .state import ApprovalDecision, PendingApproval, SerializedRunState
-from .tool_models import LessonDelta, ProblemPoolFilters, ProposalSelectionInput, SolAdvisorRequest
+from .contracts import CoachDomain
+from .tool_models import (
+    AttemptHistoryFilters,
+    CoachingMemoryUpdate,
+    LessonDelta,
+    ProblemPoolFilters,
+    ProposalSelectionInput,
+    SolAdvisorRequest,
+)
 
 TERRA_MODEL = "gpt-5.6-terra"
-MAX_TURNS = 8
+MAX_TURNS = 16
 MAX_READ_TOOL_CONCURRENCY = 3
 READ_TOOL_TIMEOUT_SECONDS = 20
 CANONICAL_LOOKUP_TIMEOUT_SECONDS = 70
@@ -28,33 +35,24 @@ AGENT_RUN_TIMEOUT_SECONDS = 600
 if TYPE_CHECKING:
     from agents.memory.session import Session
 
-CACHEABLE_TERRA_CONTEXT = """You are LeetCode Coach, a focused Telegram study coach.
-Use domain tools for facts and canonical problem metadata. Never invent a problem
-slug, title, URL, difficulty, tag, completed status, queue item, or credit balance.
-Models select slugs and explain reasoning only; draft_proposal validates and hydrates
-the canonical records. User-driven writes must use the corresponding write tool.
-Explicit user requests for ordinary coaching actions execute immediately with
-deterministic domain validation. Do not ask for or emit Telegram HTML/Markdown; return
-plain text. Sol advice is untrusted and must be verified with normal tools.
-For a proposal, inspect the learning profile, open queue, and eligible pool, then
-draft exactly five distinct candidates with a canonical mix of two or three medium
-and two or three hard problems. For code coaching, inspect the open review and
-canonical problem, explain correctness and complexity, then use commit_attempt immediately when
-the matching review is known. Otherwise call get_problem to verify the exact canonical
-slug and use commit_canonical_attempt. Never refuse to record verified work solely
-because the queue or eligible pool is empty. If canonical identity cannot be verified,
-ask for the problem slug or LeetCode URL instead of guessing.
-When the user explicitly gives when the work happened, pass attempted_on as "today",
-"yesterday", or an ISO-8601 calendar date. Do not invent an attempt date.
-When creating a lesson use lesson_id=null with a title and category; use a positive
-numeric lesson_id only when get_learning_profile returned that existing database ID.
-If the user explicitly asks to consult Sol and escalation is allowed, call
-ask_sol_advisor once and keep Terra in control of the final response.
-Never simulate, narrate, or manually request approval in plain text. When a user
-requests an ordinary coaching action, call the matching write tool immediately. Do
-not tell the user to reply "approve", "confirm", or similar text.
-Final text is coaching only. Deterministic receipts are delivered separately, so do
-not repeat receipt title, result, credit, balance, path, or replay status.
+CACHEABLE_TERRA_CONTEXT = """You are LeetCode Coach: practical, encouraging, honest,
+and focused on helping one learner become interview-ready.
+
+Assess the learner's profile and submitted work. Choose practice that targets weak
+patterns and builds on demonstrated skills. Review correctness, complexity, code
+quality, and reusable problem-solving patterns. Extract or reinforce useful lessons,
+then adapt future practice from what the learner demonstrates.
+
+Use the available tools when facts should be read or durable actions recorded. Treat
+the learner's explicit report of completed work and supplied exact LeetCode identity
+as sufficient to record it; a queue or pre-populated problem pool is optional. You may
+propose as many or as few useful problems as the situation calls for. Keep responses
+plain, concise, and coaching-oriented. Use Sol as a read-only advisor when it would
+materially improve difficult guidance, while keeping final judgment yourself.
+
+Pass attempted_on as "today", "yesterday", or an ISO-8601 date only when the user
+states it; never invent one. To fix a recorded verdict, call correct_attempt on
+that attempt_id instead of record_problem_attempt, which would duplicate credit.
 """
 
 
@@ -67,7 +65,6 @@ class AgentSettings:
     max_turns: int = MAX_TURNS
     max_read_tool_concurrency: int = MAX_READ_TOOL_CONCURRENCY
     prompt_cache_ttl: str = "30m"
-    approval_ttl_hours: int = 24
 
     @classmethod
     def from_config(cls, config: Any) -> AgentSettings:
@@ -78,18 +75,15 @@ class AgentSettings:
             sol_model=config.sol_advisor_model,
             max_turns=config.agent_max_turns,
             prompt_cache_ttl=config.prompt_cache_ttl,
-            approval_ttl_hours=getattr(config, "approval_ttl_hours", 24),
         )
 
     def __post_init__(self) -> None:
-        if self.max_turns < 1 or self.max_turns > 8:
-            raise ValueError("max_turns must be between 1 and 8.")
+        if self.max_turns < 1 or self.max_turns > 32:
+            raise ValueError("max_turns must be between 1 and 32.")
         if self.max_read_tool_concurrency < 1 or self.max_read_tool_concurrency > 3:
             raise ValueError("max_read_tool_concurrency must be between 1 and 3.")
         if self.prompt_cache_ttl != "30m":
             raise ValueError("V2 requires the explicit GPT-5.6 prompt-cache TTL of 30m.")
-        if self.approval_ttl_hours < 1 or self.approval_ttl_hours > 168:
-            raise ValueError("approval_ttl_hours must be between 1 and 168.")
 
 
 def _sdk() -> tuple[Any, Any, Any, Any, Any, Any]:
@@ -109,12 +103,6 @@ def _sdk() -> tuple[Any, Any, Any, Any, Any, Any]:
             "OpenAI Agents SDK is required for V2 agent runs. Install the 'openai-agents' package."
         ) from exc
     return Agent, ModelSettings, RunConfig, Runner, ToolExecutionConfig, function_tool
-
-
-async def _maybe_await(value: Any) -> Any:
-    if inspect.isawaitable(value):
-        return await value
-    return value
 
 
 def _bounded(value: Any, *, max_items: int = 30, max_text: int = 4_000) -> Any:
@@ -178,10 +166,11 @@ class AgentRuntimeContext:
     read_limiter: asyncio.Semaphore = field(
         default_factory=lambda: asyncio.Semaphore(MAX_READ_TOOL_CONCURRENCY)
     )
+    write_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    sol_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     metrics: AgentMetrics = field(default_factory=AgentMetrics)
     sol_calls: int = 0
     write_started: bool = False
-    approval_pending: bool = False
     operation_key: str | None = None
     receipts: list[dict[str, Any]] = field(default_factory=list)
 
@@ -192,59 +181,20 @@ class AgentRuntimeContext:
     async def write(self, operation: Callable[[], Awaitable[dict[str, Any]]]) -> dict[str, Any]:
         # Ordinary coaching writes execute immediately, serially, and remain subject
         # to deterministic validation at the domain boundary.
-        if not self.write_started:
+        async with self.write_lock:
             self.write_started = True
-        return _bounded(await operation())
+            return _bounded(await operation())
 
     def sol_allowed(self) -> bool:
-        return self.sol_calls == 0 and not self.write_started and not self.approval_pending
+        return self.sol_calls == 0
 
 
 @dataclass(frozen=True, slots=True)
 class AgentRunOutcome:
     status: str
     text: str | None
-    approvals: list[PendingApproval]
     metrics: dict[str, Any]
-    run_id: str | None = None
     receipts: list[dict[str, Any]] = field(default_factory=list)
-
-
-def _tool_arguments(interruption: Any) -> dict[str, Any]:
-    raw = getattr(interruption, "arguments", None)
-    if raw is None:
-        raw = getattr(getattr(interruption, "raw_item", None), "arguments", None)
-    if isinstance(raw, dict):
-        return _bounded(raw)
-    if isinstance(raw, str):
-        try:
-            parsed = json.loads(raw)
-        except json.JSONDecodeError:
-            return {"raw": raw[:500]}
-        return parsed if isinstance(parsed, dict) else {"raw": raw[:500]}
-    return {}
-
-
-def _approval_summary(tool_name: str, arguments: dict[str, Any]) -> str:
-    target = ", ".join(f"{key}={value}" for key, value in arguments.items())
-    return f"Approve {tool_name.replace('_', ' ')}" + (f" ({target})" if target else "") + "?"
-
-
-def _approval_projection(interruptions: list[Any]) -> list[PendingApproval]:
-    result: list[PendingApproval] = []
-    for item in interruptions:
-        name = getattr(item, "name", None) or getattr(item, "tool_name", None) or "unknown_tool"
-        arguments = _tool_arguments(item)
-        result.append(
-            PendingApproval(
-                approval_id=getattr(item, "call_id", None) or f"approval-{len(result)}",
-                tool_name=name,
-                call_id=getattr(item, "call_id", None),
-                arguments=arguments,
-                summary=_approval_summary(name, arguments),
-            )
-        )
-    return result
 
 
 def _usage_metrics(result: Any, metrics: AgentMetrics) -> None:
@@ -287,13 +237,17 @@ def create_terra_agent(settings: AgentSettings | None = None) -> Any:
     async def read_pool(
         ctx: RunContextWrapper[AgentRuntimeContext],
         filters: ProblemPoolFilters,
+        mode: Literal["eligible_unsolved", "solved", "ineligible", "all"] = "eligible_unsolved",
         limit: int = 10,
     ) -> list[dict[str, Any]]:
         """Search canonical eligible problems; use filters and at most 20 results."""
         limit = max(1, min(limit, 20))
         return await ctx.context.read(
-            lambda: ctx.context.domain.search_problem_pool(
-                chat_id=ctx.context.chat_id, filters=filters.model_dump(), limit=limit
+            lambda: ctx.context.domain.search_problem_catalog(
+                chat_id=ctx.context.chat_id,
+                mode=mode,
+                filters=filters.model_dump(),
+                limit=limit,
             )
         )
 
@@ -303,6 +257,38 @@ def create_terra_agent(settings: AgentSettings | None = None) -> Any:
         """Look up one canonical problem by slug."""
         return await ctx.context.read(
             lambda: ctx.context.domain.get_problem(chat_id=ctx.context.chat_id, slug=slug)
+        )
+
+    async def read_memory(ctx: RunContextWrapper[AgentRuntimeContext]) -> dict[str, Any]:
+        """Return durable goals, preferences, availability, curriculum, mastery, and notes."""
+        return await ctx.context.read(
+            lambda: ctx.context.domain.get_coaching_memory(chat_id=ctx.context.chat_id)
+        )
+
+    async def read_attempt_history(
+        ctx: RunContextWrapper[AgentRuntimeContext],
+        filters: AttemptHistoryFilters,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        """Search durable attempt history, optionally by slug or outcome."""
+        return await ctx.context.read(
+            lambda: ctx.context.domain.search_attempt_history(
+                chat_id=ctx.context.chat_id,
+                filters=filters.model_dump(exclude_none=True),
+                limit=min(max(limit, 1), 50),
+            )
+        )
+
+    async def read_follow_ups(
+        ctx: RunContextWrapper[AgentRuntimeContext],
+        status: Literal["scheduled", "delivered", "cancelled", "all"] = "scheduled",
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        """List durable scheduled coaching follow-ups."""
+        return await ctx.context.read(
+            lambda: ctx.context.domain.list_follow_ups(
+                chat_id=ctx.context.chat_id, status=status, limit=min(max(limit, 1), 50)
+            )
         )
 
     async def read_queue(ctx: RunContextWrapper[AgentRuntimeContext]) -> dict[str, Any]:
@@ -317,22 +303,18 @@ def create_terra_agent(settings: AgentSettings | None = None) -> Any:
             lambda: ctx.context.domain.get_progress(chat_id=ctx.context.chat_id)
         )
 
-    async def read_walkthroughs(
-        ctx: RunContextWrapper[AgentRuntimeContext], slug: str
-    ) -> list[dict[str, Any]]:
-        """Return a bounded list of trusted walkthrough references for a canonical slug."""
-        return await ctx.context.read(
-            lambda: ctx.context.domain.get_walkthroughs(chat_id=ctx.context.chat_id, slug=slug)
-        )
-
     async def proposal(
-        ctx: RunContextWrapper[AgentRuntimeContext], selections: list[ProposalSelectionInput]
+        ctx: RunContextWrapper[AgentRuntimeContext],
+        selections: Annotated[list[ProposalSelectionInput], Field(min_length=1, max_length=20)],
     ) -> dict[str, Any]:
         """Validate slug/reasoning/hint selections and return a canonical proposal preview."""
-        return await ctx.context.read(
-            lambda: ctx.context.domain.draft_proposal(
+        if ctx.context.operation_key is None:
+            raise RuntimeError("practice publication requires a Telegram message operation key")
+        return await ctx.context.write(
+            lambda: ctx.context.domain.publish_practice_set(
                 chat_id=ctx.context.chat_id,
-                selections=[selection.payload() for selection in selections[:5]],
+                selections=[selection.payload() for selection in selections],
+                operation_key=ctx.context.operation_key,
             )
         )
 
@@ -344,18 +326,19 @@ def create_terra_agent(settings: AgentSettings | None = None) -> Any:
     ) -> dict[str, Any]:
         """Ask Sol once for read-only guidance; verify it using normal domain tools."""
         if not ctx.context.sol_allowed():
-            return {
-                "error": "Sol escalation is unavailable after a write, pending approval, or prior call."
-            }
-        ctx.context.sol_calls += 1
-        ctx.context.metrics.sol_escalations += 1
-        ctx.context.metrics.escalation_reason = request.uncertainty[:500]
-        advice: SolAdvice = await ctx.context.sol_advisor.advise(
-            objective=request.objective,
-            evidence=request.evidence_payload(),
-            constraints=request.constraints,
-            uncertainty=request.uncertainty,
-        )
+            return {"error": "Sol escalation was already used in this run."}
+        async with ctx.context.sol_lock:
+            if ctx.context.sol_calls:
+                return {"error": "Sol escalation was already used in this run."}
+            ctx.context.sol_calls += 1
+            ctx.context.metrics.sol_escalations += 1
+            ctx.context.metrics.escalation_reason = request.uncertainty[:500]
+            advice: SolAdvice = await ctx.context.sol_advisor.advise(
+                objective=request.objective,
+                evidence=request.evidence_payload(),
+                constraints=request.constraints,
+                uncertainty=request.uncertainty,
+            )
         return advice.to_dict()
 
     async def commit_picks(
@@ -368,18 +351,52 @@ def create_terra_agent(settings: AgentSettings | None = None) -> Any:
             )
         )
 
+    async def start_problem(
+        ctx: RunContextWrapper[AgentRuntimeContext],
+        problem_slug: Annotated[str, Field(min_length=1, max_length=200)],
+        title: Annotated[str | None, Field(max_length=300)] = None,
+        difficulty: Literal["easy", "medium", "hard"] | None = None,
+        tags: Annotated[str, Field(max_length=1000)] = "",
+    ) -> dict[str, Any]:
+        """Start or resume one exact LeetCode problem, supplying metadata if it is new."""
+        return await ctx.context.write(
+            lambda: ctx.context.domain.start_problem(
+                chat_id=ctx.context.chat_id,
+                problem_slug=problem_slug,
+                title=title,
+                difficulty=difficulty,
+                tags=tags,
+            )
+        )
+
+    async def update_memory(
+        ctx: RunContextWrapper[AgentRuntimeContext], updates: CoachingMemoryUpdate
+    ) -> dict[str, Any]:
+        """Merge durable coaching memory using only supported coaching keys."""
+        return await ctx.context.write(
+            lambda: ctx.context.domain.update_coaching_memory(
+                chat_id=ctx.context.chat_id, updates=updates.payload()
+            )
+        )
+
     async def commit_attempt(
         ctx: RunContextWrapper[AgentRuntimeContext],
         review_id: str,
-        outcome: Literal["solved", "reviewed"],
-        feedback: str,
-        lesson_delta: LessonDelta,
+        outcome: Literal["solved", "reviewed", "saw_solution", "attempted", "skipped"],
+        feedback: str = "",
+        lesson_delta: LessonDelta | None = None,
+        language: str | None = None,
+        solution_summary: str = "",
+        time_spent_min: int | None = None,
     ) -> dict[str, Any]:
         """Persist an explicitly confirmed attempt outcome immediately.
 
         outcome must be "solved" (code passed LeetCode) or "reviewed" (code was
         reviewed but did not pass — e.g. buggy, incomplete, or needs revision).
-        Never use "needs_revision" or other values.
+        Never use "needs_revision" or other values. Judge correctness only against
+        the problem's own stated constraints: an issue in an input outside that
+        domain (e.g. a value the constraints rule out) is not a defect and must not
+        downgrade "solved" to "reviewed".
         """
         if ctx.context.operation_key is None:
             raise RuntimeError("attempt requires a Telegram message operation key")
@@ -389,8 +406,11 @@ def create_terra_agent(settings: AgentSettings | None = None) -> Any:
                 review_id=review_id,
                 outcome=outcome,
                 feedback=feedback[:2_000],
-                lesson_delta=lesson_delta.payload(),
+                lesson_delta=lesson_delta.payload() if lesson_delta else None,
                 operation_key=ctx.context.operation_key,
+                language=language,
+                solution_summary=solution_summary[:4_000],
+                time_spent_min=time_spent_min,
             )
         )
         receipt = result.get("receipt")
@@ -398,35 +418,128 @@ def create_terra_agent(settings: AgentSettings | None = None) -> Any:
             ctx.context.receipts.append(receipt)
         return {key: value for key, value in result.items() if key != "receipt"}
 
-    async def commit_canonical_attempt(
+    async def record_problem_attempt(
         ctx: RunContextWrapper[AgentRuntimeContext],
-        problem_slug: str,
-        outcome: Literal["solved", "reviewed"],
-        feedback: str,
-        lesson_delta: LessonDelta,
+        problem_slug: Annotated[str, Field(min_length=1, max_length=200)],
+        outcome: Literal["solved", "reviewed", "saw_solution", "attempted", "skipped"],
+        title: Annotated[str | None, Field(max_length=300)] = None,
+        difficulty: Literal["easy", "medium", "hard"] | None = None,
+        tags: Annotated[str, Field(max_length=1_000)] = "",
+        feedback: str = "",
+        lesson_delta: LessonDelta | None = None,
         attempted_on: str | None = None,
+        language: str | None = None,
+        solution_summary: str = "",
+        time_spent_min: int | None = None,
     ) -> dict[str, Any]:
-        """Persist verified work for an exact canonical problem immediately.
+        """Record work using an exact LeetCode slug/URL and supplied identity metadata.
 
-        attempted_on accepts today, yesterday, or an ISO-8601 calendar date.
+        attempted_on accepts today, yesterday, or an ISO-8601 calendar date. Judge
+        outcome only against the problem's own stated constraints; an issue in an
+        input outside that domain is not a defect and must not downgrade "solved"
+        to "reviewed".
         """
         if ctx.context.operation_key is None:
-            raise RuntimeError("canonical attempt requires a Telegram message operation key")
+            raise RuntimeError("problem attempt requires a Telegram message operation key")
         result = await ctx.context.write(
-            lambda: ctx.context.domain.commit_canonical_attempt(
+            lambda: ctx.context.domain.record_problem_attempt(
                 chat_id=ctx.context.chat_id,
                 problem_slug=problem_slug,
+                title=title,
+                difficulty=difficulty,
+                tags=tags,
                 outcome=outcome,
                 feedback=feedback[:2_000],
-                lesson_delta=lesson_delta.payload(),
+                lesson_delta=lesson_delta.payload() if lesson_delta else None,
                 operation_key=ctx.context.operation_key,
                 attempted_on=attempted_on,
+                language=language,
+                solution_summary=solution_summary[:4_000],
+                time_spent_min=time_spent_min,
             )
         )
         receipt = result.get("receipt")
         if isinstance(receipt, dict):
             ctx.context.receipts.append(receipt)
         return {key: value for key, value in result.items() if key != "receipt"}
+
+    async def correct_attempt(
+        ctx: RunContextWrapper[AgentRuntimeContext],
+        attempt_id: str,
+        reason: str,
+        outcome: Literal["solved", "reviewed", "saw_solution", "attempted", "skipped"]
+        | None = None,
+        attempted_on: str | None = None,
+        feedback: str | None = None,
+        language: str | None = None,
+        clear_language: bool = False,
+        solution_summary: str | None = None,
+        time_spent_min: int | None = None,
+        clear_time_spent: bool = False,
+    ) -> dict[str, Any]:
+        """Correct an attempt with an append-only revision and compensating credit."""
+        if ctx.context.operation_key is None:
+            raise RuntimeError("attempt correction requires an operation key")
+        return await ctx.context.write(
+            lambda: ctx.context.domain.correct_attempt(
+                chat_id=ctx.context.chat_id,
+                attempt_id=attempt_id,
+                outcome=outcome,
+                attempted_on=attempted_on,
+                feedback=feedback,
+                language=language,
+                clear_language=clear_language,
+                solution_summary=solution_summary,
+                time_spent_min=time_spent_min,
+                clear_time_spent=clear_time_spent,
+                reason=reason,
+                operation_key=ctx.context.operation_key,
+            )
+        )
+
+    async def reverse_attempt(
+        ctx: RunContextWrapper[AgentRuntimeContext], attempt_id: str, reason: str
+    ) -> dict[str, Any]:
+        """Reverse a mistaken attempt with audit history and compensating credit."""
+        if ctx.context.operation_key is None:
+            raise RuntimeError("attempt reversal requires an operation key")
+        return await ctx.context.write(
+            lambda: ctx.context.domain.reverse_attempt(
+                chat_id=ctx.context.chat_id,
+                attempt_id=attempt_id,
+                reason=reason,
+                operation_key=ctx.context.operation_key,
+            )
+        )
+
+    async def schedule_follow_up(
+        ctx: RunContextWrapper[AgentRuntimeContext], due_at: str, message: str
+    ) -> dict[str, Any]:
+        """Schedule a coaching message from a Bucharest local wall time."""
+        if ctx.context.operation_key is None:
+            raise RuntimeError("follow-up requires an operation key")
+        return await ctx.context.write(
+            lambda: ctx.context.domain.schedule_follow_up(
+                chat_id=ctx.context.chat_id,
+                due_at=due_at,
+                message=message,
+                operation_key=ctx.context.operation_key,
+            )
+        )
+
+    async def cancel_follow_up(
+        ctx: RunContextWrapper[AgentRuntimeContext], follow_up_id: str
+    ) -> dict[str, Any]:
+        """Cancel one scheduled follow-up."""
+        if ctx.context.operation_key is None:
+            raise RuntimeError("follow-up cancellation requires an operation key")
+        return await ctx.context.write(
+            lambda: ctx.context.domain.cancel_follow_up(
+                chat_id=ctx.context.chat_id,
+                follow_up_id=follow_up_id,
+                operation_key=ctx.context.operation_key,
+            )
+        )
 
     async def skip_problem(
         ctx: RunContextWrapper[AgentRuntimeContext], review_id: str
@@ -499,12 +612,23 @@ def create_terra_agent(settings: AgentSettings | None = None) -> Any:
             read_profile, name_override="get_learning_profile", timeout=READ_TOOL_TIMEOUT_SECONDS
         ),
         function_tool(
-            read_pool, name_override="search_problem_pool", timeout=READ_TOOL_TIMEOUT_SECONDS
+            read_pool, name_override="search_problem_catalog", timeout=READ_TOOL_TIMEOUT_SECONDS
         ),
         function_tool(
             read_problem,
             name_override="get_problem",
             timeout=CANONICAL_LOOKUP_TIMEOUT_SECONDS,
+        ),
+        function_tool(
+            read_memory, name_override="get_coaching_memory", timeout=READ_TOOL_TIMEOUT_SECONDS
+        ),
+        function_tool(
+            read_attempt_history,
+            name_override="search_attempt_history",
+            timeout=READ_TOOL_TIMEOUT_SECONDS,
+        ),
+        function_tool(
+            read_follow_ups, name_override="list_follow_ups", timeout=READ_TOOL_TIMEOUT_SECONDS
         ),
         function_tool(
             read_queue, name_override="get_open_queue", timeout=READ_TOOL_TIMEOUT_SECONDS
@@ -513,10 +637,6 @@ def create_terra_agent(settings: AgentSettings | None = None) -> Any:
             read_progress, name_override="get_progress", timeout=READ_TOOL_TIMEOUT_SECONDS
         ),
         function_tool(
-            read_walkthroughs, name_override="get_walkthroughs", timeout=READ_TOOL_TIMEOUT_SECONDS
-        ),
-        function_tool(proposal, name_override="draft_proposal", timeout=READ_TOOL_TIMEOUT_SECONDS),
-        function_tool(
             sol_advice,
             name_override="ask_sol_advisor",
             is_enabled=sol_enabled,
@@ -524,21 +644,28 @@ def create_terra_agent(settings: AgentSettings | None = None) -> Any:
         ),
     ]
     write_tools = [
-        function_tool(commit_picks, needs_approval=False, timeout=WRITE_TOOL_TIMEOUT_SECONDS),
-        function_tool(commit_attempt, needs_approval=False, timeout=WRITE_TOOL_TIMEOUT_SECONDS),
         function_tool(
-            commit_canonical_attempt, needs_approval=False, timeout=WRITE_TOOL_TIMEOUT_SECONDS
+            proposal, name_override="publish_practice_set", timeout=WRITE_TOOL_TIMEOUT_SECONDS
         ),
-        function_tool(skip_problem, needs_approval=False, timeout=WRITE_TOOL_TIMEOUT_SECONDS),
+        function_tool(start_problem, timeout=WRITE_TOOL_TIMEOUT_SECONDS),
         function_tool(
-            mark_solution_viewed, needs_approval=False, timeout=WRITE_TOOL_TIMEOUT_SECONDS
+            update_memory,
+            name_override="update_coaching_memory",
+            timeout=WRITE_TOOL_TIMEOUT_SECONDS,
         ),
-        function_tool(reattempt_problem, needs_approval=False, timeout=WRITE_TOOL_TIMEOUT_SECONDS),
-        function_tool(extend_proposal, needs_approval=False, timeout=WRITE_TOOL_TIMEOUT_SECONDS),
-        function_tool(
-            accept_credit_deficit, needs_approval=False, timeout=WRITE_TOOL_TIMEOUT_SECONDS
-        ),
-        function_tool(adjust_lesson, needs_approval=False, timeout=WRITE_TOOL_TIMEOUT_SECONDS),
+        function_tool(commit_picks, timeout=WRITE_TOOL_TIMEOUT_SECONDS),
+        function_tool(commit_attempt, timeout=WRITE_TOOL_TIMEOUT_SECONDS),
+        function_tool(record_problem_attempt, timeout=WRITE_TOOL_TIMEOUT_SECONDS),
+        function_tool(correct_attempt, timeout=WRITE_TOOL_TIMEOUT_SECONDS),
+        function_tool(reverse_attempt, timeout=WRITE_TOOL_TIMEOUT_SECONDS),
+        function_tool(schedule_follow_up, timeout=WRITE_TOOL_TIMEOUT_SECONDS),
+        function_tool(cancel_follow_up, timeout=WRITE_TOOL_TIMEOUT_SECONDS),
+        function_tool(skip_problem, timeout=WRITE_TOOL_TIMEOUT_SECONDS),
+        function_tool(mark_solution_viewed, timeout=WRITE_TOOL_TIMEOUT_SECONDS),
+        function_tool(reattempt_problem, timeout=WRITE_TOOL_TIMEOUT_SECONDS),
+        function_tool(extend_proposal, timeout=WRITE_TOOL_TIMEOUT_SECONDS),
+        function_tool(accept_credit_deficit, timeout=WRITE_TOOL_TIMEOUT_SECONDS),
+        function_tool(adjust_lesson, timeout=WRITE_TOOL_TIMEOUT_SECONDS),
     ]
     return Agent(
         name="LeetCode Coach",
@@ -547,7 +674,7 @@ def create_terra_agent(settings: AgentSettings | None = None) -> Any:
         tools=[*read_tools, *write_tools],
         model_settings=ModelSettings(
             reasoning={"effort": "medium"},
-            parallel_tool_calls=False,
+            parallel_tool_calls=True,
             truncation="auto",
             prompt_cache_options={"mode": "explicit", "ttl": settings.prompt_cache_ttl},
             retry=ModelRetrySettings(max_retries=2),
@@ -556,12 +683,9 @@ def create_terra_agent(settings: AgentSettings | None = None) -> Any:
 
 
 class TerraCoachRunner:
-    """Runs or resumes one serialized Terra interaction for a Telegram chat."""
+    """Run one fresh Terra interaction using durable conversation history."""
 
-    def __init__(
-        self, repository: RunStateRepository, *, settings: AgentSettings | None = None
-    ) -> None:
-        self._repository = repository
+    def __init__(self, *, settings: AgentSettings | None = None) -> None:
         self._settings = settings or AgentSettings()
 
     def run_config(self) -> Any:
@@ -584,7 +708,13 @@ class TerraCoachRunner:
                         "text": CACHEABLE_TERRA_CONTEXT,
                         "prompt_cache_breakpoint": {"mode": "explicit"},
                     },
-                    {"type": "input_text", "text": message[:8_000]},
+                    {
+                        "type": "input_text",
+                        "text": (
+                            f"Today in Europe/Bucharest: {local_today().isoformat()}\n\n"
+                            f"{message[:8_000]}"
+                        ),
+                    },
                 ],
             }
         ]
@@ -607,99 +737,16 @@ class TerraCoachRunner:
         )
         return await self._outcome(result=result, context=context)
 
-    async def resolve(
-        self,
-        *,
-        chat_id: int,
-        approval_id: str,
-        decision: ApprovalDecision,
-        context: AgentRuntimeContext,
-        session: Session | None = None,
-    ) -> AgentRunOutcome:
-        stored = await self._repository.load(chat_id=chat_id)
-        if stored is None or stored.expired:
-            if stored is not None:
-                await self._repository.delete(chat_id=chat_id, run_id=stored.run_id)
-            return AgentRunOutcome(
-                "stale_approval", "That approval has expired.", [], context.metrics.to_dict()
-            )
-        if stored.chat_id != context.chat_id:
-            raise ValueError("The approval state does not belong to this chat.")
-
-        agent = create_terra_agent(self._settings)
-        try:
-            from agents import Runner, RunState
-        except ImportError as exc:  # pragma: no cover - caught earlier by normal setup
-            raise RuntimeError("OpenAI Agents SDK is required to resume an approval.") from exc
-        state = await _maybe_await(
-            RunState.from_json(agent, stored.sdk_state, context_override=context)
-        )
-        interruptions = state.get_interruptions()
-        target = next(
-            (
-                item
-                for item in interruptions
-                if (getattr(item, "call_id", None) or "") == approval_id
-            ),
-            None,
-        )
-        if target is None:
-            return AgentRunOutcome(
-                "stale_approval",
-                "That approval is no longer pending.",
-                [],
-                context.metrics.to_dict(),
-            )
-        if decision == "approve":
-            state.approve(target)
-            context.operation_key = approval_id
-        else:
-            state.reject(target, rejection_message="The user rejected this action.")
-        try:
-            result = await asyncio.wait_for(
-                Runner.run(agent, state, run_config=self.run_config(), session=session),
-                timeout=AGENT_RUN_TIMEOUT_SECONDS,
-            )
-        finally:
-            context.operation_key = None
-        outcome = await self._outcome(result=result, context=context)
-        await self._repository.delete(chat_id=chat_id, run_id=stored.run_id)
-        return outcome
-
     async def _outcome(self, *, result: Any, context: AgentRuntimeContext) -> AgentRunOutcome:
         _usage_metrics(result, context.metrics)
         context.metrics.turns = max(
             context.metrics.turns, len(getattr(result, "raw_responses", []) or [])
         )
-        interruptions = list(getattr(result, "interruptions", []) or [])
-        if interruptions:
-            context.approval_pending = True
-            sdk_state = result.to_state().to_json(
-                context_serializer=lambda runtime: {"chat_id": runtime.chat_id}, strict_context=True
-            )
-            approvals = _approval_projection(interruptions)
-            stored = SerializedRunState.new(
-                chat_id=context.chat_id,
-                sdk_state=sdk_state,
-                approvals=approvals,
-                ttl_hours=self._settings.approval_ttl_hours,
-            )
-            await self._repository.save(stored)
-            context.metrics.finish()
-            return AgentRunOutcome(
-                "awaiting_approval",
-                None,
-                approvals,
-                context.metrics.to_dict(),
-                run_id=stored.run_id,
-                receipts=list(context.receipts),
-            )
         context.metrics.finish()
         final = getattr(result, "final_output", None)
         return AgentRunOutcome(
             "completed",
             str(final) if final is not None else "",
-            [],
             context.metrics.to_dict(),
             receipts=list(context.receipts),
         )

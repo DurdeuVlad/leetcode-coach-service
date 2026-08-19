@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import hashlib
+import json
 import uuid
 from collections import defaultdict
 from contextlib import asynccontextmanager
@@ -18,6 +20,7 @@ from leetcode_coach.agent.orchestrator import (
     AgentSettings,
     TerraCoachRunner,
 )
+from leetcode_coach.clock import local_today
 from leetcode_coach.config import get_settings
 from leetcode_coach.db.models import (
     AgentRunStatus,
@@ -37,15 +40,13 @@ from leetcode_coach.domain.exceptions import DomainError
 from leetcode_coach.domain.services import CoachDomain
 from leetcode_coach.integrations.telegram import answer_callback, edit_message, send_message
 from leetcode_coach.rendering import (
-    approval_keyboard,
+    paginate_proposal_html,
     proposal_keyboard,
-    render_proposal_html,
     render_work_receipt,
 )
 from leetcode_coach.runtime.adapters import (
     PostgresAgentSession,
     SQLCoachDomainAdapter,
-    SQLRunStateRepository,
 )
 
 log = structlog.get_logger("v2.application")
@@ -72,11 +73,10 @@ class CoachApplication:
     def __init__(self, engine) -> None:
         self.engine = engine
         self.domain = SQLCoachDomainAdapter(engine)
-        self.repository = SQLRunStateRepository(engine)
         settings = get_settings()
         configure_openai_sdk(settings.openai_api_key)
         self.agent_settings = AgentSettings.from_config(settings)
-        self.runner = TerraCoachRunner(self.repository, settings=self.agent_settings)
+        self.runner = TerraCoachRunner(settings=self.agent_settings)
         self.advisor = OpenAISolAdvisor(
             model=settings.sol_advisor_model, api_key=settings.openai_api_key
         )
@@ -127,22 +127,6 @@ class CoachApplication:
         reply_to_message_id: int | None,
     ) -> None:
         async with self._chat_guard(chat_id):
-            pending = await self.repository.pending_rows(chat_id)
-            normalized = text.strip().casefold()
-            if normalized in {"yes", "no"}:
-                candidates = pending
-                if reply_to_message_id is not None:
-                    candidates = [
-                        row for row in pending if row.approval_message_id == reply_to_message_id
-                    ]
-                if len(candidates) == 1:
-                    await self._resolve_approval(
-                        chat_id, candidates[0].id, normalized == "yes", message_id
-                    )
-                    return
-            # A fresh user instruction supersedes any obsolete paused approval run.
-            # No interrupted tool has executed yet, so abandoning it fabricates no effect.
-            await self.repository.abandon(chat_id=chat_id)
             outcome = await self.runner.run(
                 message=text,
                 context=self._context(chat_id, operation_key=f"telegram-message-{message_id}"),
@@ -152,17 +136,6 @@ class CoachApplication:
 
     async def handle_callback(self, *, chat_id: int, callback_id: str, data: str) -> None:
         async with self._chat_guard(chat_id):
-            if data.startswith("v2a:"):
-                try:
-                    _, alias, choice = data.split(":", 2)
-                    if not alias or choice not in {"yes", "no"}:
-                        raise ValueError
-                except ValueError:
-                    await answer_callback(callback_id, "This action is no longer active.")
-                    return
-                await answer_callback(callback_id)
-                await self._resolve_approval(chat_id, alias, choice == "yes", None)
-                return
             if data.startswith("v2p:"):
                 try:
                     _, batch, position = data.split(":", 2)
@@ -172,7 +145,22 @@ class CoachApplication:
                     return
                 await answer_callback(callback_id)
                 try:
-                    await self._direct_pick(chat_id, batch_id, candidate_position)
+                    await self._direct_pick(
+                        chat_id, batch_id, candidate_position, callback_id=callback_id
+                    )
+                except DomainError:
+                    await send_message(chat_id, "That proposal is no longer active.")
+                return
+            if data.startswith("v2pd:"):
+                try:
+                    _, batch = data.split(":", 1)
+                    batch_id = int(batch)
+                except ValueError:
+                    await answer_callback(callback_id, "This action is no longer active.")
+                    return
+                await answer_callback(callback_id)
+                try:
+                    await self._commit_direct_picks(chat_id, batch_id)
                 except DomainError:
                     await send_message(chat_id, "That proposal is no longer active.")
                 return
@@ -185,7 +173,9 @@ class CoachApplication:
                     return
                 await answer_callback(callback_id)
                 try:
-                    await self._direct_review_action(chat_id, action, review_id)
+                    await self._direct_review_action(
+                        chat_id, action, review_id, callback_id=callback_id
+                    )
                 except DomainError:
                     await send_message(chat_id, "That review action is no longer active.")
                 return
@@ -223,10 +213,8 @@ class CoachApplication:
                 return
             if data == "v2n:accept":
                 await answer_callback(callback_id)
-                import datetime as dt
-
                 await self.domain.accept_credit_deficit(
-                    chat_id=chat_id, date=dt.date.today().isoformat()
+                    chat_id=chat_id, date=local_today().isoformat()
                 )
                 await send_message(chat_id, "Deficit acknowledged.")
                 return
@@ -248,45 +236,20 @@ class CoachApplication:
                 return
             if data == "v2n:snooze":
                 await answer_callback(callback_id)
-                import datetime as dt
-
                 with Session(self.engine) as session:
                     CoachDomain(session).set_bot_state(
-                        chat_id, "nudge_snoozed_on", dt.date.today().isoformat()
+                        chat_id, "nudge_snoozed_on", local_today().isoformat()
                     )
                     session.commit()
                 await send_message(chat_id, "Nudge snoozed until tomorrow.")
                 return
             await answer_callback(callback_id, "This action is no longer active.")
 
-    async def _resolve_approval(
-        self, chat_id: int, alias: str, approved: bool, reply_to_message_id: int | None
-    ) -> None:
-        call_id = await self.repository.resolve_alias(chat_id, alias, approved)
-        if call_id is None:
-            await send_message(chat_id, "That approval is no longer active.")
-            return
-        outcome = await self.runner.resolve(
-            chat_id=chat_id,
-            approval_id=call_id,
-            decision="approve" if approved else "reject",
-            context=self._context(chat_id),
-            session=PostgresAgentSession(self.engine, chat_id),
-        )
-        await self.repository.finalize_alias(chat_id, alias, approved)
-        await self._deliver_outcome(chat_id, outcome, reply_to_message_id=reply_to_message_id)
-
     async def _deliver_outcome(
         self, chat_id: int, outcome: AgentRunOutcome, *, reply_to_message_id: int | None
     ) -> None:
         log.info("agent_run", status=outcome.status, **outcome.metrics)
         await asyncio.to_thread(self._persist_metrics, chat_id, outcome)
-        if outcome.status == "awaiting_approval":
-            rows = await self.repository.pending_rows(chat_id)
-            await self._send_pending_approvals(
-                chat_id, rows, reply_to_message_id=reply_to_message_id
-            )
-            return
         for receipt in outcome.receipts:
             await send_message(
                 chat_id,
@@ -302,27 +265,6 @@ class CoachApplication:
                 reply_to_message_id=reply_to_message_id,
             )
 
-    async def _send_pending_approvals(
-        self,
-        chat_id: int,
-        rows: list,
-        *,
-        reply_to_message_id: int | None,
-    ) -> int:
-        sent = 0
-        for row in rows:
-            if row.approval_message_id is not None:
-                continue
-            message_id = await send_message(
-                chat_id,
-                row.summary,
-                reply_to_message_id=reply_to_message_id,
-                reply_markup=approval_keyboard(row.id),
-            )
-            await self.repository.set_approval_message(row.id, message_id)
-            sent += 1
-        return sent
-
     def _persist_metrics(self, chat_id: int, outcome: AgentRunOutcome) -> None:
         metrics = outcome.metrics
         started_raw = metrics.get("started_at")
@@ -331,33 +273,11 @@ class CoachApplication:
         finished = dt.datetime.fromisoformat(finished_raw) if finished_raw else None
         latency_ms = int((finished - started).total_seconds() * 1000) if finished else None
         with Session(self.engine) as session:
-            if outcome.status == "awaiting_approval" and outcome.run_id:
-                run = session.get(V2AgentRun, outcome.run_id)
-                if run is None:
-                    raise RuntimeError("paused agent run is missing its serialized state")
-                run.turn_count = int(metrics.get("turns") or 0)
-                run.sol_calls = int(metrics.get("sol_escalations") or 0)
-                run.model = str(metrics.get("model") or self.agent_settings.terra_model)
-                run.input_tokens = int(metrics.get("input_tokens") or 0)
-                run.output_tokens = int(metrics.get("output_tokens") or 0)
-                run.cache_read_tokens = int(metrics.get("cached_tokens") or 0)
-                run.cache_write_tokens = int(metrics.get("cache_write_tokens") or 0)
-                run.tool_calls = int(metrics.get("tool_calls") or 0)
-                run.escalation_reason = (
-                    str(metrics["escalation_reason"]) if metrics.get("escalation_reason") else None
-                )
-                run.latency_ms = latency_ms
-                session.commit()
-                return
             session.add(
                 V2AgentRun(
                     id=f"metrics-{uuid.uuid4().hex}",
                     chat_id=chat_id,
-                    status=(
-                        AgentRunStatus.COMPLETED
-                        if outcome.status == "completed"
-                        else AgentRunStatus.PAUSED
-                    ),
+                    status=AgentRunStatus.COMPLETED,
                     turn_count=int(metrics.get("turns") or 0),
                     sol_calls=int(metrics.get("sol_escalations") or 0),
                     model=str(metrics.get("model") or self.agent_settings.terra_model),
@@ -386,10 +306,22 @@ class CoachApplication:
                     .where(
                         V2ProposalBatch.chat_id == chat_id,
                         V2ProposalBatch.telegram_message_id == None,  # noqa: E711
+                        V2ProposalBatch.status == ProposalStatus.OPEN,
                     )
                     .order_by(V2ProposalBatch.id.desc())
                 ).first()
                 if batch is None:
+                    return None
+                if batch.status != ProposalStatus.OPEN:
+                    progress = session.exec(
+                        select(V2BotState).where(
+                            V2BotState.chat_id == chat_id,
+                            V2BotState.key == f"proposal_delivery:{batch.id}",
+                        )
+                    ).first()
+                    if progress is not None:
+                        session.delete(progress)
+                        session.commit()
                     return None
                 candidates = session.exec(
                     select(V2ProposalCandidate)
@@ -408,24 +340,82 @@ class CoachApplication:
                             "coaching_hint": candidate.coaching_hint,
                         }
                     )
-                return batch.id, cards
+                delivery = session.exec(
+                    select(V2BotState).where(
+                        V2BotState.chat_id == chat_id,
+                        V2BotState.key == f"proposal_delivery:{batch.id}",
+                    )
+                ).first()
+                progress = {"next_page": 0, "first_message_id": None}
+                if delivery is not None:
+                    try:
+                        parsed = json.loads(delivery.value)
+                        if isinstance(parsed, dict):
+                            progress["next_page"] = max(0, int(parsed.get("next_page", 0)))
+                            first = parsed.get("first_message_id")
+                            progress["first_message_id"] = int(first) if first is not None else None
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        pass
+                return batch.id, cards, progress
 
         loaded = await asyncio.to_thread(load)
         if loaded is None:
             return False
-        batch_id, cards = loaded
-        message_id = await send_message(
+        batch_id, cards, progress = loaded
+        pages = paginate_proposal_html(cards)
+        if not pages:
+            return False
+        next_page = min(int(progress["next_page"]), len(pages))
+        first_message_id = progress["first_message_id"]
+        for page_index in range(next_page, len(pages)):
+            text, _positions = pages[page_index]
+            message_id = await send_message(
+                chat_id,
+                text,
+                parse_mode="HTML",
+            )
+            if first_message_id is None:
+                first_message_id = message_id
+
+            def save_progress(
+                saved_page: int = page_index + 1,
+                saved_first: int | None = first_message_id,
+            ) -> None:
+                with Session(self.engine) as session:
+                    CoachDomain(session).set_bot_state(
+                        chat_id,
+                        f"proposal_delivery:{batch_id}",
+                        json.dumps(
+                            {
+                                "next_page": saved_page,
+                                "first_message_id": saved_first,
+                            },
+                            separators=(",", ":"),
+                        ),
+                    )
+                    session.commit()
+
+            await asyncio.to_thread(save_progress)
+
+        controller_message_id = await send_message(
             chat_id,
-            render_proposal_html(cards),
-            parse_mode="HTML",
+            "Choose any problems, then tap Done.",
             reply_markup=proposal_keyboard(batch_id, len(cards)),
         )
 
         def persist():
             with Session(self.engine) as session:
                 batch = session.get(V2ProposalBatch, batch_id)
-                if batch is not None:
-                    batch.telegram_message_id = message_id
+                if batch is not None and batch.status == ProposalStatus.OPEN:
+                    batch.telegram_message_id = controller_message_id
+                    delivery = session.exec(
+                        select(V2BotState).where(
+                            V2BotState.chat_id == chat_id,
+                            V2BotState.key == f"proposal_delivery:{batch_id}",
+                        )
+                    ).first()
+                    if delivery is not None:
+                        session.delete(delivery)
                     session.commit()
 
         await asyncio.to_thread(persist)
@@ -450,8 +440,13 @@ class CoachApplication:
         if review_ids:
             await self._send_review_threads(chat_id, review_ids)
 
-    async def _direct_pick(self, chat_id: int, batch_id: int, position: int) -> None:
+    async def _direct_pick(
+        self, chat_id: int, batch_id: int, position: int, *, callback_id: str
+    ) -> None:
         key = f"pick:{batch_id}"
+        callback_key = (
+            f"pickcb:{batch_id}:" f"{hashlib.sha256(callback_id.encode('utf-8')).hexdigest()[:24]}"
+        )
 
         def choose():
             with Session(self.engine) as session:
@@ -471,39 +466,120 @@ class CoachApplication:
                 ).first()
                 if candidate is None or candidate.status != CandidateStatus.AVAILABLE:
                     return None
+                replay = session.exec(
+                    select(V2BotState).where(
+                        V2BotState.chat_id == chat_id, V2BotState.key == callback_key
+                    )
+                ).first()
+                if replay is not None:
+                    parsed = json.loads(replay.value)
+                    return parsed["action"], parsed["slug"], parsed["count"]
                 state = session.exec(
                     select(V2BotState).where(V2BotState.chat_id == chat_id, V2BotState.key == key)
                 ).first()
-                if state is None:
-                    CoachDomain(session).set_bot_state(chat_id, key, candidate.problem_slug)
-                    session.commit()
-                    return "first", candidate.problem_slug, []
-                first = state.value
-                if first == candidate.problem_slug:
-                    return "duplicate", first, []
-                reviews = CoachDomain(session).commit_picks(
-                    chat_id, batch_id, [first, candidate.problem_slug]
+                selected = json.loads(state.value) if state is not None else []
+                if not isinstance(selected, list) or any(
+                    not isinstance(item, str) for item in selected
+                ):
+                    selected = []
+                if candidate.problem_slug in selected:
+                    selected.remove(candidate.problem_slug)
+                    action = "Unselected"
+                else:
+                    selected.append(candidate.problem_slug)
+                    action = "Selected"
+                if selected:
+                    CoachDomain(session).set_bot_state(
+                        chat_id, key, json.dumps(selected, separators=(",", ":"))
+                    )
+                elif state is not None:
+                    session.delete(state)
+                CoachDomain(session).set_bot_state(
+                    chat_id,
+                    callback_key,
+                    json.dumps(
+                        {"action": action, "slug": candidate.problem_slug, "count": len(selected)},
+                        separators=(",", ":"),
+                    ),
                 )
-                session.delete(state)
                 session.commit()
-                return "done", candidate.problem_slug, [review.id for review in reviews]
+                return action, candidate.problem_slug, len(selected)
 
         result = await asyncio.to_thread(choose)
         if result is None:
             await send_message(chat_id, "That proposal is no longer active.")
-        elif result[0] == "first":
-            await send_message(chat_id, "First pick saved. Tap a different problem for pick two.")
-        elif result[0] == "duplicate":
-            await send_message(chat_id, "Pick a different second problem.")
         else:
-            await self._send_review_threads(chat_id, result[2])
+            await send_message(
+                chat_id,
+                f"{result[0]} {result[1]}. {result[2]} selected; tap Done when ready.",
+            )
+
+    async def _commit_direct_picks(self, chat_id: int, batch_id: int) -> None:
+        key = f"pick:{batch_id}"
+
+        def commit():
+            with Session(self.engine) as session:
+                batch = session.get(V2ProposalBatch, batch_id)
+                if (
+                    batch is not None
+                    and batch.chat_id == chat_id
+                    and batch.status == ProposalStatus.PICKED
+                ):
+                    return [
+                        row.id
+                        for row in session.exec(
+                            select(V2PendingReview).where(
+                                V2PendingReview.chat_id == chat_id,
+                                V2PendingReview.batch_id == batch_id,
+                            )
+                        ).all()
+                    ]
+                state = session.exec(
+                    select(V2BotState).where(V2BotState.chat_id == chat_id, V2BotState.key == key)
+                ).first()
+                if (
+                    batch is None
+                    or batch.chat_id != chat_id
+                    or batch.status != ProposalStatus.OPEN
+                    or as_utc(batch.expires_at) <= utcnow()
+                    or state is None
+                ):
+                    return None
+                selected = json.loads(state.value)
+                if not isinstance(selected, list) or not selected:
+                    return None
+                reviews = CoachDomain(session).commit_picks(chat_id, batch_id, selected)
+                session.delete(state)
+                cleanup = session.exec(
+                    select(V2BotState).where(
+                        V2BotState.chat_id == chat_id,
+                        V2BotState.key.startswith(f"pickcb:{batch_id}:"),
+                    )
+                ).all()
+                delivery = session.exec(
+                    select(V2BotState).where(
+                        V2BotState.chat_id == chat_id,
+                        V2BotState.key == f"proposal_delivery:{batch_id}",
+                    )
+                ).first()
+                for row in cleanup:
+                    session.delete(row)
+                if delivery is not None:
+                    session.delete(delivery)
+                session.commit()
+                return [review.id for review in reviews]
+
+        review_ids = await asyncio.to_thread(commit)
+        if review_ids is None:
+            raise DomainError("proposal selection is unavailable")
+        await self._send_review_threads(chat_id, review_ids)
 
     async def _send_review_threads(self, chat_id: int, review_ids: list[int]) -> None:
         for review_id in review_ids:
             with Session(self.engine) as session:
                 review = session.get(V2PendingReview, review_id)
                 problem = session.get(V2Problem, review.problem_slug) if review else None
-            if review is None or problem is None:
+            if review is None or problem is None or review.telegram_message_id is not None:
                 continue
             message_id = await send_message(
                 chat_id,
@@ -525,7 +601,9 @@ class CoachApplication:
                     current.telegram_message_id = message_id
                     session.commit()
 
-    async def _direct_review_action(self, chat_id: int, action: str, review_id: int) -> None:
+    async def _direct_review_action(
+        self, chat_id: int, action: str, review_id: int, *, callback_id: str | None = None
+    ) -> None:
         if action == "skip":
             await self.domain.skip_problem(chat_id=chat_id, review_id=str(review_id))
             await send_message(chat_id, "Skipped.")
@@ -536,8 +614,14 @@ class CoachApplication:
             result = await self.domain.reattempt_problem(chat_id=chat_id, review_id=str(review_id))
             await self._send_review_threads(chat_id, [int(result["id"])])
         elif action in {"hint", "why"}:
+            callback_key = f"review_coaching:{review_id}:{callback_id or action}"
             with Session(self.engine) as session:
                 review = session.get(V2PendingReview, review_id)
+                replay = session.exec(
+                    select(V2BotState).where(
+                        V2BotState.chat_id == chat_id, V2BotState.key == callback_key
+                    )
+                ).first()
                 candidate = (
                     session.get(V2ProposalCandidate, review.candidate_id)
                     if review is not None
@@ -545,12 +629,53 @@ class CoachApplication:
                     and review.candidate_id is not None
                     else None
                 )
-            if candidate is None:
-                await send_message(chat_id, "No proposal context is available for this review.")
+                problem = (
+                    session.get(V2Problem, review.problem_slug)
+                    if review is not None and review.chat_id == chat_id
+                    else None
+                )
+                level_state = session.exec(
+                    select(V2BotState).where(
+                        V2BotState.chat_id == chat_id,
+                        V2BotState.key == f"hint_level:{review_id}",
+                    )
+                ).first()
+                hint_level = min(3, int(level_state.value) + 1) if level_state else 1
+            if replay is not None:
+                await send_message(chat_id, replay.value)
+                return
+            if review is None or problem is None:
+                await send_message(chat_id, "That review action is no longer active.")
             else:
-                await send_message(
-                    chat_id,
-                    candidate.coaching_hint if action == "hint" else candidate.reasoning,
+                optional_hint = candidate.coaching_hint if candidate is not None else ""
+                optional_reason = candidate.reasoning if candidate is not None else ""
+                coaching_request = (
+                    f"Give hint level {hint_level} of 3 for {problem.title} ({problem.slug}). "
+                    f"Level 1 is conceptual only; level 2 states the invariant and next step; "
+                    f"level 3 gives pseudocode without a full solution. Optional prior context: "
+                    f"{optional_hint}"
+                    if action == "hint"
+                    else f"Explain concisely why working on {problem.title} ({problem.slug}) is "
+                    f"useful for me now. Optional selection rationale: {optional_reason}"
+                )
+                outcome = await self.runner.run(
+                    message=coaching_request,
+                    context=self._context(
+                        chat_id, operation_key=f"telegram-callback-{callback_id}"
+                    ),
+                    session=PostgresAgentSession(self.engine, chat_id),
+                )
+                if outcome.text:
+                    with Session(self.engine) as session:
+                        domain = CoachDomain(session)
+                        domain.set_bot_state(chat_id, callback_key, outcome.text[:4000])
+                        if action == "hint":
+                            domain.set_bot_state(
+                                chat_id, f"hint_level:{review_id}", str(hint_level)
+                            )
+                        session.commit()
+                await self._deliver_outcome(
+                    chat_id, outcome, reply_to_message_id=review.telegram_message_id
                 )
         else:
             await send_message(chat_id, "That review action is no longer active.")

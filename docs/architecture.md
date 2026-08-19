@@ -3,10 +3,16 @@
 > **Status: V1 historical design — superseded 2026-08-03.**
 >
 > The authoritative V2 architecture is [`agentic-v2.md`](./agentic-v2.md).
-> Its single Terra controller, bounded tools, one-shot Sol advisor, approval
-> state, fresh schema, and OpenAI-only policy override conflicting V1 sections,
+> Its single Terra controller, bounded tools, one-shot Sol advisor, immediate
+> serialized writes, fresh schema, and OpenAI-only policy override conflicting V1 sections,
 > especially §5 and §12. This document remains to explain the V1 deployment
 > and aid the learning-data migration; it is not an implementation target.
+>
+> **Proposal clarification (2026-08-16):** all V1 references to `propose_5`,
+> five-problem output, fixed difficulty mixes, canonical eligibility pools,
+> or at-most-two picks are historical only. Current behavior is defined in
+> `agentic-v2.md`: flexible coach-chosen counts, toggle + Done selection, exact
+> normalized identities, and deterministic Telegram-safe pagination.
 
 ## 1. Why a Python service, not n8n
 

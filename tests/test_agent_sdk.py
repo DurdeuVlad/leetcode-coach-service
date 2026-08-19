@@ -87,6 +87,7 @@ def test_terra_agent_has_bounded_model_and_expected_tools() -> None:
     assert "'maxItems': 20" in proposal_schema
     assert "clear_language" in correction_schema
     assert "clear_time_spent" in correction_schema
+    assert "attempted_on" in tools["record_problem_attempt"].params_json_schema["properties"]
     assert tools["get_problem"].timeout_seconds == CANONICAL_LOOKUP_TIMEOUT_SECONDS == 70
     assert tools["get_progress"].timeout_seconds != CANONICAL_LOOKUP_TIMEOUT_SECONDS
 
@@ -109,8 +110,11 @@ async def test_attempt_tool_captures_receipt_out_of_band() -> None:
         "replayed": False,
     }
 
+    observed = {}
+
     class FakeDomain:
         async def record_problem_attempt(self, **kwargs):
+            observed.update(kwargs)
             return {"problem_slug": kwargs["problem_slug"], "receipt": receipt}
 
     context = AgentRuntimeContext(
@@ -132,6 +136,7 @@ async def test_attempt_tool_captures_receipt_out_of_band() -> None:
             "outcome": "solved",
             "feedback": "passed",
             "lesson_delta": {"lesson_id": None},
+            "attempted_on": "yesterday",
         }
     )
     await tool.on_invoke_tool(
@@ -145,6 +150,7 @@ async def test_attempt_tool_captures_receipt_out_of_band() -> None:
     )
 
     assert context.receipts == [receipt]
+    assert observed["attempted_on"] == "yesterday"
 
 
 @pytest.mark.asyncio

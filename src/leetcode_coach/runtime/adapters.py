@@ -54,6 +54,20 @@ def _clip(value: Any, limit: int) -> str:
     return text if len(text) <= limit else f"{text[: limit - 1]}…"
 
 
+def _parse_attempted_on(value: str | None) -> dt.date | None:
+    if value is None or not value.strip():
+        return None
+    normalized = value.strip().casefold()
+    if normalized == "today":
+        return local_today()
+    if normalized == "yesterday":
+        return local_today() - dt.timedelta(days=1)
+    try:
+        return dt.date.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError("attempt date must be today, yesterday, or an ISO-8601 date") from exc
+
+
 def _money(value: Decimal, *, signed: bool = False) -> str:
     amount = value.quantize(Decimal("0.01"))
     return f"{amount:+.2f}" if signed else f"{amount:.2f}"
@@ -547,7 +561,7 @@ class SQLCoachDomainAdapter:
             raise ValueError("problem title must contain at most 300 characters")
         if len(tags) > 1_000:
             raise ValueError("problem tags must contain at most 1000 characters")
-        parsed_date = dt.date.fromisoformat(attempted_on) if attempted_on else local_today()
+        parsed_date = _parse_attempted_on(attempted_on) or local_today()
         if parsed_date > local_today():
             raise ValueError("attempted_on cannot be in the future")
 
@@ -628,7 +642,7 @@ class SQLCoachDomainAdapter:
         reason: str,
         operation_key: str,
     ) -> JsonObject:
-        parsed = dt.date.fromisoformat(attempted_on) if attempted_on else None
+        parsed = _parse_attempted_on(attempted_on)
         if parsed is not None and parsed > local_today():
             raise ValueError("attempted_on cannot be in the future")
         return await self._write(

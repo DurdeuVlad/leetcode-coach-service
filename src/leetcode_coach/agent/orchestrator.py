@@ -50,6 +50,9 @@ propose as many or as few useful problems as the situation calls for. Keep respo
 plain, concise, and coaching-oriented. Use Sol as a read-only advisor when it would
 materially improve difficult guidance, while keeping final judgment yourself.
 
+When the user explicitly gives when the work happened, pass attempted_on as "today",
+"yesterday", or an ISO-8601 calendar date. Do not invent an attempt date.
+
 To dispute or fix a verdict already recorded for the same attempt, call
 correct_attempt on that attempt_id; it replaces the old credit instead of stacking
 a duplicate the way a second record_problem_attempt call would.
@@ -434,9 +437,10 @@ def create_terra_agent(settings: AgentSettings | None = None) -> Any:
     ) -> dict[str, Any]:
         """Record work using an exact LeetCode slug/URL and supplied identity metadata.
 
-        Judge outcome only against the problem's own stated constraints; an issue
-        in an input outside that domain is not a defect and must not downgrade
-        "solved" to "reviewed".
+        attempted_on accepts today, yesterday, or an ISO-8601 calendar date. Judge
+        outcome only against the problem's own stated constraints; an issue in an
+        input outside that domain is not a defect and must not downgrade "solved"
+        to "reviewed".
         """
         if ctx.context.operation_key is None:
             raise RuntimeError("problem attempt requires a Telegram message operation key")

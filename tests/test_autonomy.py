@@ -297,6 +297,47 @@ async def test_due_followup_delivery_retries_failure_then_marks_delivered(engine
 
 
 @pytest.mark.asyncio
+async def test_followup_delivery_gives_up_after_max_attempts(engine, monkeypatch):
+    from leetcode_coach import jobs
+
+    with Session(engine) as session:
+        session.add(
+            V2FollowUp(
+                id="always-fails",
+                chat_id=7,
+                due_at=dt.datetime.now(dt.UTC) - dt.timedelta(minutes=1),
+                message="Retry coin change",
+                idempotency_key="always-fails",
+            )
+        )
+        session.commit()
+
+    async def always_fail(chat_id, message, **kwargs):
+        raise RuntimeError("transport down")
+
+    monkeypatch.setattr(jobs, "engine", engine)
+    monkeypatch.setattr(jobs, "send_message", always_fail)
+
+    for _ in range(jobs.FOLLOW_UP_MAX_ATTEMPTS - 1):
+        await jobs.deliver_due_follow_ups()
+        with Session(engine) as session:
+            row = session.get(V2FollowUp, "always-fails")
+            assert row.status == "scheduled"
+
+    await jobs.deliver_due_follow_ups()
+    with Session(engine) as session:
+        row = session.get(V2FollowUp, "always-fails")
+        assert row.status == "failed"
+        assert row.attempt_count == jobs.FOLLOW_UP_MAX_ATTEMPTS
+
+    # A failed follow-up must not be picked up again on the next tick.
+    await jobs.deliver_due_follow_ups()
+    with Session(engine) as session:
+        row = session.get(V2FollowUp, "always-fails")
+        assert row.attempt_count == jobs.FOLLOW_UP_MAX_ATTEMPTS
+
+
+@pytest.mark.asyncio
 async def test_delivering_followup_cannot_be_cancelled(engine):
     with Session(engine) as session:
         row = V2FollowUp(

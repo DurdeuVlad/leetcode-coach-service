@@ -28,6 +28,7 @@ from leetcode_coach.integrations.telegram import edit_message, send_message
 settings = get_settings()
 engine = create_db_engine(settings.database_url)
 FOLLOW_UP_CLAIM_LEASE = dt.timedelta(minutes=5)
+FOLLOW_UP_MAX_ATTEMPTS = 5
 
 
 async def apply_daily_tax() -> None:
@@ -154,8 +155,10 @@ async def deliver_due_follow_ups() -> None:
             with Session(engine) as session:
                 row = session.get(V2FollowUp, follow_up_id)
                 if row is not None and row.status == "delivering":
-                    row.status = "scheduled"
                     row.attempt_count += 1
+                    row.status = (
+                        "failed" if row.attempt_count >= FOLLOW_UP_MAX_ATTEMPTS else "scheduled"
+                    )
                     row.last_error = str(exc)[:1000]
                     row.updated_at = utcnow()
                     session.commit()

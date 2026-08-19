@@ -22,11 +22,14 @@ def upgrade() -> None:
                 "value", type_=sa.Text(), existing_type=sa.String(4000), nullable=False
             )
     problem_columns = {column["name"] for column in inspector.get_columns("v2_problems")}
+    problem_indexes = {index["name"] for index in inspector.get_indexes("v2_problems")}
     if "verified_solved" not in problem_columns:
         op.add_column(
             "v2_problems",
             sa.Column("verified_solved", sa.Boolean(), server_default=sa.false(), nullable=False),
         )
+    if "ix_v2_problems_verified_solved" not in problem_indexes:
+        op.create_index("ix_v2_problems_verified_solved", "v2_problems", ["verified_solved"])
     if "attempt_baseline_count" not in problem_columns:
         op.add_column(
             "v2_problems",

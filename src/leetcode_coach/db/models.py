@@ -12,6 +12,7 @@ from enum import Enum
 import sqlalchemy as sa
 from sqlmodel import Field
 
+from leetcode_coach.clock import local_today
 from leetcode_coach.db.base import BaseSQLModel
 
 
@@ -83,6 +84,9 @@ class V2Problem(BaseSQLModel, table=True):
     eligible: bool = Field(default=True, index=True)
     last_attempted: dt.date | None = Field(default=None)
     times_attempted: int = Field(default=0)
+    verified_solved: bool = Field(default=False, index=True)
+    attempt_baseline_count: int = Field(default=0)
+    attempt_baseline_last: dt.date | None = Field(default=None)
     created_at: dt.datetime = Field(default_factory=utcnow)
     updated_at: dt.datetime = Field(default_factory=utcnow)
 
@@ -96,11 +100,15 @@ class V2Attempt(BaseSQLModel, table=True):
     chat_id: int = Field(sa_column=sa.Column(sa.BigInteger, nullable=False, index=True))
     review_id: int | None = Field(default=None, foreign_key="v2_pending_reviews.id", index=True)
     problem_slug: str = Field(foreign_key="v2_problems.slug", max_length=200, index=True)
-    attempted_on: dt.date = Field(default_factory=dt.date.today, index=True)
+    attempted_on: dt.date = Field(default_factory=local_today, index=True)
     outcome: str = Field(max_length=30)
     feedback: str = Field(default="", max_length=4000)
     time_spent_min: int | None = Field(default=None)
+    language: str | None = Field(default=None, max_length=50)
+    solution_summary: str = Field(default="", sa_column=sa.Column(sa.Text, nullable=False))
+    reversed_at: dt.datetime | None = Field(default=None, index=True)
     created_at: dt.datetime = Field(default_factory=utcnow)
+    updated_at: dt.datetime = Field(default_factory=utcnow)
 
 
 class V2Lesson(BaseSQLModel, table=True):
@@ -114,7 +122,7 @@ class V2Lesson(BaseSQLModel, table=True):
     category: str = Field(default="general", max_length=100)
     active: bool = Field(default=True, index=True)
     times_reinforced: int = Field(default=1)
-    created_at: dt.date = Field(default_factory=dt.date.today)
+    created_at: dt.date = Field(default_factory=local_today)
     updated_at: dt.datetime = Field(default_factory=utcnow)
 
 
@@ -123,7 +131,7 @@ class V2ProposalBatch(BaseSQLModel, table=True):
 
     id: int | None = Field(default=None, primary_key=True)
     chat_id: int = Field(sa_column=sa.Column(sa.BigInteger, nullable=False, index=True))
-    proposed_on: dt.date = Field(default_factory=dt.date.today, index=True)
+    proposed_on: dt.date = Field(default_factory=local_today, index=True)
     status: ProposalStatus = Field(
         default=ProposalStatus.OPEN,
         sa_column=sa.Column(sa.String(20), nullable=False, index=True),
@@ -171,7 +179,7 @@ class V2PendingReview(BaseSQLModel, table=True):
     telegram_message_id: int | None = Field(
         default=None, sa_column=sa.Column(sa.BigInteger, nullable=True, index=True)
     )
-    proposed_on: dt.date = Field(default_factory=dt.date.today, index=True)
+    proposed_on: dt.date = Field(default_factory=local_today, index=True)
     status: ReviewStatus = Field(
         default=ReviewStatus.OPEN,
         sa_column=sa.Column(sa.String(20), nullable=False, index=True),
@@ -188,8 +196,9 @@ class V2CreditLedger(BaseSQLModel, table=True):
     idempotency_key: str = Field(max_length=200, unique=True, index=True)
     amount: Decimal = Field(sa_column=sa.Column(sa.Numeric(10, 2), nullable=False))
     reason: str = Field(max_length=50, index=True)
-    effective_on: dt.date = Field(default_factory=dt.date.today, index=True)
+    effective_on: dt.date = Field(default_factory=local_today, index=True)
     review_id: int | None = Field(default=None, foreign_key="v2_pending_reviews.id", index=True)
+    attempt_id: int | None = Field(default=None, foreign_key="v2_attempts.id", index=True)
     created_at: dt.datetime = Field(default_factory=utcnow)
 
 
@@ -200,7 +209,7 @@ class V2BotState(BaseSQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
     chat_id: int = Field(sa_column=sa.Column(sa.BigInteger, nullable=False, index=True))
     key: str = Field(max_length=100)
-    value: str = Field(default="", max_length=4000)
+    value: str = Field(default="", sa_column=sa.Column(sa.Text, nullable=False))
     updated_at: dt.datetime = Field(default_factory=utcnow)
 
 
@@ -277,3 +286,35 @@ class V2PendingApproval(BaseSQLModel, table=True):
     )
     created_at: dt.datetime = Field(default_factory=utcnow)
     resolved_at: dt.datetime | None = Field(default=None)
+
+
+class V2AttemptRevision(BaseSQLModel, table=True):
+    __tablename__ = "v2_attempt_revisions"
+
+    id: int | None = Field(default=None, primary_key=True)
+    chat_id: int = Field(sa_column=sa.Column(sa.BigInteger, nullable=False, index=True))
+    attempt_id: int = Field(foreign_key="v2_attempts.id", index=True)
+    operation_key: str = Field(max_length=200, unique=True, index=True)
+    action: str = Field(max_length=20)
+    before_json: str = Field(sa_column=sa.Column(sa.Text, nullable=False))
+    after_json: str = Field(sa_column=sa.Column(sa.Text, nullable=False))
+    reason: str = Field(default="", max_length=1000)
+    created_at: dt.datetime = Field(default_factory=utcnow)
+
+
+class V2FollowUp(BaseSQLModel, table=True):
+    __tablename__ = "v2_follow_ups"
+    __table_args__ = (sa.Index("ix_v2_follow_up_status_due", "status", "due_at"),)
+
+    id: str = Field(primary_key=True, max_length=64)
+    chat_id: int = Field(sa_column=sa.Column(sa.BigInteger, nullable=False, index=True))
+    due_at: dt.datetime = Field(index=True)
+    message: str = Field(sa_column=sa.Column(sa.Text, nullable=False))
+    status: str = Field(default="scheduled", max_length=20, index=True)
+    idempotency_key: str = Field(max_length=200, unique=True, index=True)
+    attempt_count: int = Field(default=0)
+    last_error: str | None = Field(default=None, max_length=1000)
+    created_at: dt.datetime = Field(default_factory=utcnow)
+    updated_at: dt.datetime = Field(default_factory=utcnow)
+    delivered_at: dt.datetime | None = Field(default=None)
+    cancelled_at: dt.datetime | None = Field(default=None)

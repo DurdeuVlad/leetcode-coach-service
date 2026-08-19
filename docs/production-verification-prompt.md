@@ -124,7 +124,7 @@ discovered safely, mark only that check unverified.
 ### 4. Check migrations and database connectivity
 
 Inside the running app container, run read-only `alembic current` and
-`alembic heads`. Both must resolve to `v2_0001`. Confirm database reachability with
+`alembic heads`. Both must resolve to `v2_0002`. Confirm database reachability with
 `SELECT 1` and verify the Alembic version through schema metadata. Do not print
 `DATABASE_URL`, database credentials, application rows, or user data.
 
@@ -169,7 +169,7 @@ The current scheduler facts are:
 - timezone `Europe/Bucharest`;
 - advisory lock bigint `8204202602`;
 - lock metadata split `classid=1`, `objid=3909235306`;
-- schema gate `v2_0001`;
+- schema gate `v2_0002`;
 - jobs at 00:00 daily tax, 09:05 queue refill, 20:00 nudge, 22:00 expiry,
   and Monday 03:00 problem refresh.
 

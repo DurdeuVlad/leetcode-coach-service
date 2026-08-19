@@ -1,16 +1,18 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
 from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
 class ProposalSelection:
-    """The only problem fields an LLM is permitted to provide."""
+    """Problem identity and coaching copy selected by the agent."""
 
     slug: str
     reasoning: str = ""
     coaching_hint: str = ""
+    title: str | None = None
+    difficulty: str | None = None
+    tags: str = ""
 
 
 @dataclass(frozen=True)
@@ -31,9 +33,3 @@ class ProposalPreview:
 
     def as_dict(self) -> dict[str, object]:
         return {"candidates": [candidate.__dict__ for candidate in self.candidates]}
-
-
-def normalise_mix(required_mix: Mapping[str, int] | None) -> dict[str, int] | None:
-    if required_mix is None:
-        return None
-    return {str(key).lower(): int(value) for key, value in required_mix.items()}

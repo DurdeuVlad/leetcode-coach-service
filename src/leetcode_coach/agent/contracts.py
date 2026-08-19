@@ -1,20 +1,23 @@
 """Narrow contracts consumed by the agent layer.
 
-Implement these at the domain/database boundary.  Tool handlers never accept
-model-provided copies of canonical problem metadata.
+Implement these at the domain/database boundary. Exact problem identity and
+agent-supplied metadata are normalized before durable operations.
 """
 
 from __future__ import annotations
 
-from typing import Any, Protocol, TypedDict
+from typing import Any, NotRequired, Protocol, TypedDict
 
 JsonObject = dict[str, Any]
 
 
 class ProposalSelection(TypedDict):
-    """The only proposal fields the model is allowed to supply."""
+    """Problem identity and coaching copy chosen by the agent."""
 
     slug: str
+    title: NotRequired[str]
+    difficulty: NotRequired[str]
+    tags: NotRequired[str]
     reasoning: str
     coaching_hint: str
 
@@ -24,20 +27,36 @@ class CoachDomain(Protocol):
 
     async def get_learning_profile(self, *, chat_id: int) -> JsonObject: ...
 
-    async def search_problem_pool(
-        self, *, chat_id: int, filters: JsonObject, limit: int
+    async def search_problem_catalog(
+        self, *, chat_id: int, mode: str, filters: JsonObject, limit: int
     ) -> list[JsonObject]: ...
 
     async def get_problem(self, *, chat_id: int, slug: str) -> JsonObject | None: ...
+
+    async def start_problem(
+        self,
+        *,
+        chat_id: int,
+        problem_slug: str,
+        title: str | None,
+        difficulty: str | None,
+        tags: str,
+    ) -> JsonObject: ...
+
+    async def get_coaching_memory(self, *, chat_id: int) -> JsonObject: ...
+
+    async def update_coaching_memory(self, *, chat_id: int, updates: JsonObject) -> JsonObject: ...
 
     async def get_open_queue(self, *, chat_id: int) -> JsonObject: ...
 
     async def get_progress(self, *, chat_id: int) -> JsonObject: ...
 
-    async def get_walkthroughs(self, *, chat_id: int, slug: str) -> list[JsonObject]: ...
+    async def search_attempt_history(
+        self, *, chat_id: int, filters: JsonObject, limit: int
+    ) -> list[JsonObject]: ...
 
-    async def draft_proposal(
-        self, *, chat_id: int, selections: list[ProposalSelection]
+    async def publish_practice_set(
+        self, *, chat_id: int, selections: list[ProposalSelection], operation_key: str
     ) -> JsonObject: ...
 
     async def commit_picks(
@@ -50,20 +69,46 @@ class CoachDomain(Protocol):
         chat_id: int,
         review_id: str,
         outcome: str,
-        feedback: str,
-        lesson_delta: JsonObject,
+        feedback: str = "",
+        lesson_delta: JsonObject | None = None,
         operation_key: str | None = None,
+        language: str | None = None,
+        solution_summary: str = "",
+        time_spent_min: int | None = None,
     ) -> JsonObject: ...
 
-    async def commit_canonical_attempt(
+    async def record_problem_attempt(
         self,
         *,
         chat_id: int,
         problem_slug: str,
+        title: str | None = None,
+        difficulty: str | None = None,
+        tags: str = "",
         outcome: str,
-        feedback: str,
-        lesson_delta: JsonObject,
+        feedback: str = "",
+        lesson_delta: JsonObject | None = None,
+        attempted_on: str | None = None,
         operation_key: str,
+        language: str | None = None,
+        solution_summary: str = "",
+        time_spent_min: int | None = None,
+    ) -> JsonObject: ...
+
+    async def correct_attempt(self, **kwargs: Any) -> JsonObject: ...
+
+    async def reverse_attempt(self, **kwargs: Any) -> JsonObject: ...
+
+    async def schedule_follow_up(
+        self, *, chat_id: int, due_at: str, message: str, operation_key: str
+    ) -> JsonObject: ...
+
+    async def list_follow_ups(
+        self, *, chat_id: int, status: str, limit: int
+    ) -> list[JsonObject]: ...
+
+    async def cancel_follow_up(
+        self, *, chat_id: int, follow_up_id: str, operation_key: str
     ) -> JsonObject: ...
 
     async def skip_problem(self, *, chat_id: int, review_id: str) -> JsonObject: ...
@@ -85,23 +130,3 @@ class CoachDomain(Protocol):
         lesson_delta: JsonObject,
         operation_key: str | None = None,
     ) -> JsonObject: ...
-
-
-class RunStateRepository(Protocol):
-    """Persistence boundary for a paused Agents SDK run.
-
-    Implementations must serialize operations per ``chat_id``.  The agent runner
-    does not use this storage as a conversation transcript.
-    """
-
-    async def save(self, state: SerializedRunState) -> None: ...
-
-    async def load(self, *, chat_id: int) -> SerializedRunState | None: ...
-
-    async def delete(self, *, chat_id: int, run_id: str) -> None: ...
-
-    async def abandon(self, *, chat_id: int) -> None: ...
-
-
-# Deferred to avoid a runtime import cycle while retaining usable Protocol hints.
-from .state import SerializedRunState  # noqa: E402

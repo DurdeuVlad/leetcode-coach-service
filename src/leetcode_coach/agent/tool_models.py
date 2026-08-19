@@ -20,14 +20,38 @@ class ProblemPoolFilters(StrictToolModel):
     topic: str | None = Field(default=None, max_length=80)
 
 
+class AttemptHistoryFilters(StrictToolModel):
+    problem_slug: str | None = Field(default=None, max_length=200)
+    outcome: Literal["solved", "reviewed", "saw_solution", "attempted", "skipped"] | None = None
+    include_reversed: bool = False
+
+
+class CoachingMemoryUpdate(StrictToolModel):
+    goals: str | list[str] | None = Field(default=None, max_length=100)
+    preferences: str | list[str] | None = Field(default=None, max_length=100)
+    availability: str | list[str] | None = Field(default=None, max_length=100)
+    curriculum: str | list[str] | None = Field(default=None, max_length=100)
+    mastery: str | list[str] | None = Field(default=None, max_length=100)
+    notes: str | None = Field(default=None, max_length=4000)
+
+    def payload(self) -> dict[str, object]:
+        return self.model_dump(exclude_none=True)
+
+
 class ProposalSelectionInput(StrictToolModel):
     slug: str = Field(min_length=1, max_length=160)
+    title: str = Field(min_length=1, max_length=300)
+    difficulty: Literal["easy", "medium", "hard"]
+    tags: str = Field(default="", max_length=1_000)
     reasoning: str = Field(min_length=1, max_length=800)
     coaching_hint: str = Field(min_length=1, max_length=800)
 
     def payload(self) -> ProposalSelection:
         return {
             "slug": self.slug,
+            "title": self.title,
+            "difficulty": self.difficulty,
+            "tags": self.tags,
             "reasoning": self.reasoning,
             "coaching_hint": self.coaching_hint,
         }
@@ -50,7 +74,7 @@ class LessonDelta(StrictToolModel):
     note: str | None = Field(default=None, max_length=1_000)
 
     def payload(self) -> dict[str, str | int | None]:
-        return self.model_dump()
+        return self.model_dump(exclude_none=True)
 
 
 class SolEvidenceItem(StrictToolModel):

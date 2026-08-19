@@ -30,21 +30,29 @@ def test_terra_agent_has_bounded_model_and_expected_tools() -> None:
     tools = {tool.name: tool for tool in agent.tools}
 
     assert agent.model == TERRA_MODEL
-    assert agent.model_settings.parallel_tool_calls is False
+    assert agent.model_settings.parallel_tool_calls is True
     assert agent.model_settings.reasoning.effort == "medium"
     assert agent.model_settings.prompt_cache_options == {"mode": "explicit", "ttl": "30m"}
     assert {
         "get_learning_profile",
-        "search_problem_pool",
+        "search_problem_catalog",
         "get_problem",
+        "get_coaching_memory",
+        "search_attempt_history",
+        "list_follow_ups",
         "get_open_queue",
         "get_progress",
-        "get_walkthroughs",
-        "draft_proposal",
+        "publish_practice_set",
         "ask_sol_advisor",
+        "start_problem",
+        "update_coaching_memory",
         "commit_picks",
         "commit_attempt",
-        "commit_canonical_attempt",
+        "record_problem_attempt",
+        "correct_attempt",
+        "reverse_attempt",
+        "schedule_follow_up",
+        "cancel_follow_up",
         "skip_problem",
         "mark_solution_viewed",
         "reattempt_problem",
@@ -57,7 +65,7 @@ def test_terra_agent_has_bounded_model_and_expected_tools() -> None:
         for name in {
             "commit_picks",
             "commit_attempt",
-            "commit_canonical_attempt",
+            "record_problem_attempt",
             "skip_problem",
             "mark_solution_viewed",
             "reattempt_problem",
@@ -66,10 +74,19 @@ def test_terra_agent_has_bounded_model_and_expected_tools() -> None:
             "adjust_lesson",
         }
     )
-    assert "Never refuse to record verified work solely" in CACHEABLE_TERRA_CONTEXT
-    assert "ask for the problem slug or LeetCode URL" in CACHEABLE_TERRA_CONTEXT
-    assert "use commit_canonical_attempt" in CACHEABLE_TERRA_CONTEXT
-    assert "operation_key" not in str(tools["commit_canonical_attempt"].params_json_schema)
+    assert "Choose practice that targets" in CACHEABLE_TERRA_CONTEXT
+    assert "Review correctness, complexity" in CACHEABLE_TERRA_CONTEXT
+    assert "canonical mix" not in CACHEABLE_TERRA_CONTEXT
+    assert "exactly five" not in CACHEABLE_TERRA_CONTEXT
+    assert "operation_key" not in str(tools["record_problem_attempt"].params_json_schema)
+    record_schema = str(tools["record_problem_attempt"].params_json_schema)
+    proposal_schema = str(tools["publish_practice_set"].params_json_schema)
+    correction_schema = str(tools["correct_attempt"].params_json_schema)
+    assert "'maxLength': 300" in record_schema
+    assert "'maxLength': 1000" in record_schema
+    assert "'maxItems': 20" in proposal_schema
+    assert "clear_language" in correction_schema
+    assert "clear_time_spent" in correction_schema
     assert tools["get_problem"].timeout_seconds == CANONICAL_LOOKUP_TIMEOUT_SECONDS == 70
     assert tools["get_progress"].timeout_seconds != CANONICAL_LOOKUP_TIMEOUT_SECONDS
 
@@ -78,7 +95,7 @@ def test_attempt_tools_require_internal_message_operation_key() -> None:
     agent = create_terra_agent()
     tools = {tool.name: tool for tool in agent.tools}
     assert "operation_key" not in str(tools["commit_attempt"].params_json_schema)
-    assert "operation_key" not in str(tools["commit_canonical_attempt"].params_json_schema)
+    assert "operation_key" not in str(tools["record_problem_attempt"].params_json_schema)
 
 
 @pytest.mark.asyncio
@@ -93,7 +110,7 @@ async def test_attempt_tool_captures_receipt_out_of_band() -> None:
     }
 
     class FakeDomain:
-        async def commit_canonical_attempt(self, **kwargs):
+        async def record_problem_attempt(self, **kwargs):
             return {"problem_slug": kwargs["problem_slug"], "receipt": receipt}
 
     context = AgentRuntimeContext(
@@ -103,12 +120,15 @@ async def test_attempt_tool_captures_receipt_out_of_band() -> None:
         operation_key="message-1",
     )
     tool = next(
-        tool for tool in create_terra_agent().tools if tool.name == "commit_canonical_attempt"
+        tool for tool in create_terra_agent().tools if tool.name == "record_problem_attempt"
     )
 
     arguments = json.dumps(
         {
             "problem_slug": "coin-change",
+            "title": "Coin Change",
+            "difficulty": "medium",
+            "tags": "dynamic-programming",
             "outcome": "solved",
             "feedback": "passed",
             "lesson_delta": {"lesson_id": None},
@@ -136,19 +156,36 @@ async def test_completed_outcome_carries_captured_receipts() -> None:
         interruptions=[], raw_responses=[], final_output="Coaching only.", context_wrapper=None
     )
 
-    outcome = await TerraCoachRunner(object())._outcome(result=result, context=context)
+    outcome = await TerraCoachRunner()._outcome(result=result, context=context)
 
     assert outcome.receipts == [receipt]
 
 
-def test_stable_prompt_reserves_final_text_for_coaching() -> None:
-    assert "Final text is coaching only" in CACHEABLE_TERRA_CONTEXT
+def test_stable_prompt_is_a_lean_coaching_playbook() -> None:
+    assert "adapt future practice" in CACHEABLE_TERRA_CONTEXT
+    assert "a queue or pre-populated problem pool is optional" in CACHEABLE_TERRA_CONTEXT
+    assert "receipts are delivered separately" not in CACHEABLE_TERRA_CONTEXT
+    assert len(CACHEABLE_TERRA_CONTEXT.split()) < 180
+
+
+def test_stable_prompt_directs_disputes_to_correct_attempt() -> None:
+    assert "correct_attempt" in CACHEABLE_TERRA_CONTEXT
+    assert "record_problem_attempt" in CACHEABLE_TERRA_CONTEXT
+
+
+def test_outcome_tools_scope_grading_to_stated_constraints() -> None:
+    agent = create_terra_agent()
+    tools = {tool.name: tool for tool in agent.tools}
+
+    for name in ("commit_attempt", "record_problem_attempt"):
+        assert "stated constraints" in tools[name].description
+        assert "must not" in tools[name].description
 
 
 def test_runner_config_caps_local_tool_concurrency() -> None:
-    config = TerraCoachRunner(object()).run_config()
+    config = TerraCoachRunner().run_config()
     assert config.tool_execution.max_function_tool_concurrency == MAX_READ_TOOL_CONCURRENCY
-    assert MAX_TURNS == 8
+    assert MAX_TURNS == 16
     assert AGENT_RUN_TIMEOUT_SECONDS == 600
 
 
@@ -168,8 +205,8 @@ def test_settings_adapt_v2_config_and_keep_the_hard_turn_limit() -> None:
     assert settings.sol_model == "sol-test"
     assert settings.max_turns == 8
 
-    with pytest.raises(ValueError, match="between 1 and 8"):
-        AgentSettings(max_turns=9)
+    with pytest.raises(ValueError, match="between 1 and 32"):
+        AgentSettings(max_turns=33)
 
 
 def test_usage_metrics_records_cache_reads_and_writes() -> None:
@@ -233,67 +270,3 @@ def test_lesson_ids_are_database_integers_not_model_invented_names() -> None:
     with pytest.raises(ValidationError):
         LessonDelta(lesson_id="grid-connected-components")
     assert LessonDelta(lesson_id=7).lesson_id == 7
-
-
-@pytest.mark.asyncio
-async def test_legacy_attempt_approval_resume_uses_approval_id_as_operation_key(
-    monkeypatch,
-) -> None:
-    target = SimpleNamespace(call_id="legacy-attempt-call")
-    observed = {}
-
-    class FakeState:
-        def __init__(self, context):
-            self.context = context
-
-        def get_interruptions(self):
-            return [target]
-
-        def approve(self, item):
-            assert item is target
-
-        def reject(self, item, rejection_message):  # pragma: no cover - approve path only
-            raise AssertionError((item, rejection_message))
-
-    class FakeRunState:
-        @staticmethod
-        def from_json(agent, sdk_state, context_override):
-            del agent, sdk_state
-            return FakeState(context_override)
-
-    class FakeRunner:
-        @staticmethod
-        async def run(agent, state, run_config, session):
-            del agent, run_config, session
-            observed["operation_key"] = state.context.operation_key
-            return SimpleNamespace(interruptions=[], raw_responses=[], final_output="recorded")
-
-    class FakeRepository:
-        async def load(self, *, chat_id):
-            return SimpleNamespace(
-                chat_id=chat_id,
-                expired=False,
-                sdk_state={"legacy": True},
-                run_id="legacy-run",
-            )
-
-        async def delete(self, *, chat_id, run_id):
-            observed["deleted"] = (chat_id, run_id)
-
-    monkeypatch.setattr(agents, "RunState", FakeRunState)
-    monkeypatch.setattr(agents, "Runner", FakeRunner)
-    context = AgentRuntimeContext(chat_id=7, domain=object(), sol_advisor=object())
-
-    outcome = await TerraCoachRunner(FakeRepository()).resolve(
-        chat_id=7,
-        approval_id="legacy-attempt-call",
-        decision="approve",
-        context=context,
-    )
-
-    assert outcome.status == "completed"
-    assert observed == {
-        "operation_key": "legacy-attempt-call",
-        "deleted": (7, "legacy-run"),
-    }
-    assert context.operation_key is None

@@ -1,6 +1,6 @@
 from sqlmodel import Session, create_engine, select
 
-from leetcode_coach.db.models import BaseSQLModel, V2CreditLedger
+from leetcode_coach.db.models import BaseSQLModel, V2CreditLedger, V2Problem
 from leetcode_coach.domain.migration import import_learning_data
 
 
@@ -20,7 +20,7 @@ def test_imports_only_learning_records_and_not_historical_credits():
         )
         conn.exec_driver_sql("CREATE TABLE credit_ledger (id INTEGER PRIMARY KEY, amount NUMERIC)")
         conn.exec_driver_sql(
-            "INSERT INTO leetcode_problems VALUES ('house-robber', 'House Robber', 'https://lc/198', 'easy', 'dp', 0, NULL, 0)"
+            "INSERT INTO leetcode_problems VALUES ('house-robber', 'House Robber', 'https://lc/198', 'easy', 'dp', 1, '2026-02-01', 3)"
         )
         conn.exec_driver_sql(
             "INSERT INTO leetcode_log VALUES (1, 'house-robber', '2026-01-01', 'solved', 10, 'nice', 12)"
@@ -33,3 +33,7 @@ def test_imports_only_learning_records_and_not_historical_credits():
         target.commit()
         assert result == {"problems": 1, "attempts": 1, "lessons": 1}
         assert target.exec(select(V2CreditLedger)).all() == []
+        problem = target.get(V2Problem, "house-robber")
+        assert problem.verified_solved is True
+        assert problem.attempt_baseline_count == 2
+        assert problem.attempt_baseline_last.isoformat() == "2026-02-01"

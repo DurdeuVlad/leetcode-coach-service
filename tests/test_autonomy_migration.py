@@ -1,0 +1,46 @@
+from alembic import command
+from alembic.config import Config
+from sqlalchemy import create_engine, inspect, text
+
+
+def test_v2_0002_upgrade_downgrade_upgrade_roundtrip(tmp_path, monkeypatch):
+    database = tmp_path / "roundtrip.db"
+    url = f"sqlite:///{database.as_posix()}"
+    monkeypatch.setenv("DATABASE_URL", url)
+    config = Config("alembic.ini")
+
+    command.upgrade(config, "head")
+    command.downgrade(config, "v2_0001")
+    command.upgrade(config, "head")
+
+    engine = create_engine(url)
+    assert "attempt_id" in {
+        column["name"] for column in inspect(engine).get_columns("v2_credit_ledger")
+    }
+    with engine.connect() as connection:
+        assert (
+            connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
+            == "v2_0002"
+        )
+
+
+def test_v2_0002_downgrade_tolerates_old_problem_table_without_new_index(tmp_path, monkeypatch):
+    database = tmp_path / "old-schema-roundtrip.db"
+    url = f"sqlite:///{database.as_posix()}"
+    monkeypatch.setenv("DATABASE_URL", url)
+    config = Config("alembic.ini")
+
+    command.upgrade(config, "head")
+    engine = create_engine(url)
+    with engine.begin() as connection:
+        connection.execute(text("DROP INDEX ix_v2_problems_verified_solved"))
+    assert "ix_v2_problems_verified_solved" not in {
+        index["name"] for index in inspect(engine).get_indexes("v2_problems")
+    }
+
+    command.downgrade(config, "v2_0001")
+    command.upgrade(config, "head")
+
+    assert "verified_solved" in {
+        column["name"] for column in inspect(engine).get_columns("v2_problems")
+    }

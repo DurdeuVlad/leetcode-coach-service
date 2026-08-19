@@ -33,7 +33,7 @@ class OpenAISolAdvisor:
     """A deliberately tool-less single Responses API call.
 
     It is not an Agent and receives no domain object.  That makes writes,
-    approvals, and handoffs impossible by construction.
+    mutations and handoffs impossible by construction.
     """
 
     MODEL = "gpt-5.6-sol"

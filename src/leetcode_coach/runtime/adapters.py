@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import hashlib
 import json
-import secrets
 from decimal import Decimal
 from typing import Any
 
@@ -14,18 +14,16 @@ from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 from leetcode_coach.agent.contracts import JsonObject
-from leetcode_coach.agent.state import PendingApproval, SerializedRunState
+from leetcode_coach.clock import local_today, local_wall_to_utc
 from leetcode_coach.db.models import (
-    AgentRunStatus,
-    ApprovalStatus,
     Difficulty,
     ReviewStatus,
-    V2AgentRun,
     V2Attempt,
+    V2BotState,
     V2ConversationItem,
     V2CreditLedger,
+    V2FollowUp,
     V2Lesson,
-    V2PendingApproval,
     V2PendingReview,
     V2Problem,
     utcnow,
@@ -103,6 +101,9 @@ def _attempt_view(attempt: V2Attempt) -> JsonObject:
         "outcome": attempt.outcome,
         "feedback": _clip(attempt.feedback, 500),
         "time_spent_min": attempt.time_spent_min,
+        "language": attempt.language,
+        "solution_summary": _clip(attempt.solution_summary, 1000),
+        "reversed_at": _jsonable(attempt.reversed_at),
     }
 
 
@@ -159,7 +160,10 @@ class SQLCoachDomainAdapter:
             ).all()
             attempts = session.exec(
                 select(V2Attempt)
-                .where(V2Attempt.chat_id == chat_id)
+                .where(
+                    V2Attempt.chat_id == chat_id,
+                    V2Attempt.reversed_at == None,  # noqa: E711
+                )
                 .order_by(V2Attempt.id.desc())
                 .limit(30)
             ).all()
@@ -170,16 +174,24 @@ class SQLCoachDomainAdapter:
 
         return await self._read(query)
 
-    async def search_problem_pool(
-        self, *, chat_id: int, filters: JsonObject, limit: int
+    async def search_problem_catalog(
+        self, *, chat_id: int, mode: str = "eligible_unsolved", filters: JsonObject, limit: int
     ) -> list[JsonObject]:
         del chat_id
 
         def query(session: Session):
-            statement = select(V2Problem).where(
-                V2Problem.eligible == True,  # noqa: E712
-                V2Problem.solved == False,  # noqa: E712
-            )
+            statement = select(V2Problem)
+            if mode == "eligible_unsolved":
+                statement = statement.where(
+                    V2Problem.eligible == True,  # noqa: E712
+                    V2Problem.solved == False,  # noqa: E712
+                )
+            elif mode == "solved":
+                statement = statement.where(V2Problem.solved == True)  # noqa: E712
+            elif mode == "ineligible":
+                statement = statement.where(V2Problem.eligible == False)  # noqa: E712
+            elif mode != "all":
+                raise ValueError("invalid catalog mode")
             difficulties = [
                 str(value).lower()
                 for value in filters.get("difficulty", [])
@@ -247,6 +259,86 @@ class SQLCoachDomainAdapter:
                 raise
             return winner
 
+    async def start_problem(
+        self,
+        *,
+        chat_id: int,
+        problem_slug: str,
+        title: str | None,
+        difficulty: str | None,
+        tags: str,
+    ) -> JsonObject:
+        normalized = exact_problem_slug(problem_slug)
+
+        def start(session: Session):
+            problem = session.get(V2Problem, normalized)
+            if problem is None:
+                normalized_title = str(title or "").strip()
+                normalized_difficulty = str(difficulty or "").lower()
+                if not normalized_title or normalized_difficulty not in {"easy", "medium", "hard"}:
+                    raise ValueError("a new problem requires title and difficulty metadata")
+                problem = V2Problem(
+                    slug=normalized,
+                    title=normalized_title[:300],
+                    url=f"https://leetcode.com/problems/{normalized}/",
+                    difficulty=Difficulty(normalized_difficulty),
+                    tags=tags[:1000],
+                    eligible=False,
+                )
+                session.add(problem)
+                session.flush()
+            review = session.exec(
+                select(V2PendingReview).where(
+                    V2PendingReview.chat_id == chat_id,
+                    V2PendingReview.problem_slug == normalized,
+                    V2PendingReview.status == ReviewStatus.OPEN,
+                )
+            ).first()
+            if review is None:
+                review = V2PendingReview(chat_id=chat_id, problem_slug=normalized)
+                session.add(review)
+                session.flush()
+            return _review_view(review)
+
+        return await self._write(start)
+
+    async def get_coaching_memory(self, *, chat_id: int) -> JsonObject:
+        def query(session: Session):
+            row = session.exec(
+                select(V2BotState).where(
+                    V2BotState.chat_id == chat_id, V2BotState.key == "coaching_memory"
+                )
+            ).first()
+            if row is None:
+                return {"version": 1}
+            value = json.loads(row.value)
+            return value if isinstance(value, dict) else {"version": 1}
+
+        return await self._read(query)
+
+    async def update_coaching_memory(self, *, chat_id: int, updates: JsonObject) -> JsonObject:
+        allowed = {"goals", "preferences", "availability", "curriculum", "mastery", "notes"}
+        unknown = set(updates) - allowed
+        if unknown:
+            raise ValueError(f"unsupported memory key: {sorted(unknown)[0]}")
+
+        def update(session: Session):
+            domain = SyncCoachDomain(session)
+            row = session.exec(
+                select(V2BotState).where(
+                    V2BotState.chat_id == chat_id, V2BotState.key == "coaching_memory"
+                )
+            ).first()
+            memory = json.loads(row.value) if row is not None else {"version": 1}
+            memory.update(updates)
+            encoded = json.dumps(memory, sort_keys=True, separators=(",", ":"))
+            if len(encoded) > 20_000:
+                raise ValueError("coaching memory exceeds 20000 characters")
+            domain.set_bot_state(chat_id, "coaching_memory", encoded)
+            return memory
+
+        return await self._write(update)
+
     async def get_open_queue(self, *, chat_id: int) -> JsonObject:
         def query(session: Session):
             reviews = session.exec(
@@ -263,9 +355,11 @@ class SQLCoachDomainAdapter:
         def query(session: Session):
             attempts = session.exec(
                 select(V2Attempt)
-                .where(V2Attempt.chat_id == chat_id)
+                .where(
+                    V2Attempt.chat_id == chat_id,
+                    V2Attempt.reversed_at == None,  # noqa: E711
+                )
                 .order_by(V2Attempt.id.desc())
-                .limit(20)
             ).all()
             lessons = session.exec(
                 select(V2Lesson).where(V2Lesson.chat_id == chat_id, V2Lesson.active == True)  # noqa: E712
@@ -273,13 +367,11 @@ class SQLCoachDomainAdapter:
             balance = SyncCoachDomain(session).credit_balance(chat_id)
             dates = sorted({row.attempted_on for row in attempts}, reverse=True)
             streak = 0
-            cursor = dt.date.today()
-            for attempted_on in dates:
-                if attempted_on == cursor:
-                    streak += 1
-                    cursor -= dt.timedelta(days=1)
-                elif attempted_on < cursor:
-                    break
+            cursor = local_today()
+            date_set = set(dates)
+            while cursor in date_set:
+                streak += 1
+                cursor -= dt.timedelta(days=1)
             return {
                 "recent_attempts": [_attempt_view(row) for row in attempts],
                 "active_lessons": [_lesson_view(row) for row in lessons],
@@ -289,35 +381,83 @@ class SQLCoachDomainAdapter:
 
         return await self._read(query)
 
-    async def get_walkthroughs(self, *, chat_id: int, slug: str) -> list[JsonObject]:
-        # V2 intentionally has no Browserless/SearXNG dependency. Keep the
-        # typed tool deterministic until a first-party tutorial source exists.
-        await self.get_problem(chat_id=chat_id, slug=slug)
-        return []
+    async def search_attempt_history(
+        self, *, chat_id: int, filters: JsonObject, limit: int
+    ) -> list[JsonObject]:
+        def query(session: Session):
+            statement = select(V2Attempt).where(V2Attempt.chat_id == chat_id)
+            if not filters.get("include_reversed", False):
+                statement = statement.where(V2Attempt.reversed_at == None)  # noqa: E711
+            if filters.get("problem_slug"):
+                statement = statement.where(
+                    V2Attempt.problem_slug == exact_problem_slug(str(filters["problem_slug"]))
+                )
+            if filters.get("outcome"):
+                statement = statement.where(V2Attempt.outcome == str(filters["outcome"]))
+            rows = session.exec(
+                statement.order_by(V2Attempt.id.desc()).limit(min(max(limit, 1), 50))
+            ).all()
+            return [_attempt_view(row) for row in rows]
 
-    async def draft_proposal(self, *, chat_id: int, selections: list[JsonObject]) -> JsonObject:
+        return await self._read(query)
+
+    async def publish_practice_set(
+        self, *, chat_id: int, selections: list[JsonObject], operation_key: str
+    ) -> JsonObject:
+        if len(selections) > 20:
+            raise ValueError("a proposal supports at most 20 candidates for Telegram transport")
         parsed = [
             ProposalSelection(
-                slug=str(item.get("slug", "")),
+                slug=exact_problem_slug(str(item.get("slug", ""))),
                 reasoning=str(item.get("reasoning", ""))[:2000],
                 coaching_hint=str(item.get("coaching_hint", ""))[:2000],
+                title=str(item.get("title", "")).strip()[:300] or None,
+                difficulty=str(item.get("difficulty", "")).strip().lower() or None,
+                tags=str(item.get("tags", ""))[:1000],
             )
             for item in selections
         ]
 
         def create():
             with Session(self.engine) as session:
-                if len(parsed) != 5:
-                    raise ValueError("a proposal requires exactly five selections")
+                replay_key = (
+                    "proposal_publish:"
+                    + hashlib.sha256(f"{chat_id}:{operation_key}".encode()).hexdigest()
+                )
+                replay = session.exec(
+                    select(V2BotState).where(
+                        V2BotState.chat_id == chat_id, V2BotState.key == replay_key
+                    )
+                ).first()
+                if replay is not None:
+                    return {"batch_id": int(replay.value), "replayed": True}
+                if not parsed:
+                    raise ValueError("a proposal requires at least one selection")
+                for selection in parsed:
+                    problem = session.get(V2Problem, selection.slug)
+                    if problem is None:
+                        if selection.title is None or selection.difficulty not in {
+                            "easy",
+                            "medium",
+                            "hard",
+                        }:
+                            raise ValueError(
+                                "a new proposal problem requires title and difficulty metadata"
+                            )
+                        session.add(
+                            V2Problem(
+                                slug=selection.slug,
+                                title=selection.title,
+                                url=f"https://leetcode.com/problems/{selection.slug}/",
+                                difficulty=Difficulty(selection.difficulty),
+                                tags=selection.tags,
+                                eligible=False,
+                            )
+                        )
+                session.flush()
                 domain = SyncCoachDomain(session)
-                preview = domain.draft_proposal(parsed)
-                counts = {"medium": 0, "hard": 0}
-                for candidate in preview.candidates:
-                    if candidate.difficulty in counts:
-                        counts[candidate.difficulty] += 1
-                if counts["medium"] not in {2, 3} or counts["hard"] not in {2, 3}:
-                    raise ValueError("proposal requires 2-3 medium and 2-3 hard canonical problems")
                 batch, preview = domain.create_proposal(chat_id, parsed)
+                domain.set_bot_state(chat_id, replay_key, str(batch.id))
                 session.commit()
                 return {"batch_id": batch.id, **preview.as_dict()}
 
@@ -337,6 +477,9 @@ class SQLCoachDomainAdapter:
         feedback: str,
         lesson_delta: JsonObject,
         operation_key: str | None = None,
+        language: str | None = None,
+        solution_summary: str = "",
+        time_spent_min: int | None = None,
     ) -> JsonObject:
         def commit(session: Session):
             review = session.get(V2PendingReview, int(review_id))
@@ -350,6 +493,9 @@ class SQLCoachDomainAdapter:
                 feedback,
                 lesson_delta,
                 operation_key=operation_key,
+                language=language,
+                solution_summary=solution_summary,
+                time_spent_min=time_spent_min,
             )
             replayed = isinstance(result, dict) and result.get("replayed") is True
             recorded_outcome = outcome
@@ -377,33 +523,72 @@ class SQLCoachDomainAdapter:
 
         return await self._write(commit)
 
-    async def commit_canonical_attempt(
+    async def record_problem_attempt(
         self,
         *,
         chat_id: int,
         problem_slug: str,
+        title: str | None = None,
+        difficulty: str | None = None,
+        tags: str = "",
         outcome: str,
         feedback: str,
         lesson_delta: JsonObject,
         operation_key: str,
+        attempted_on: str | None = None,
+        language: str | None = None,
+        solution_summary: str = "",
+        time_spent_min: int | None = None,
     ) -> JsonObject:
+        normalized = exact_problem_slug(problem_slug)
+        if len(normalized) > 200:
+            raise ValueError("problem slug must contain at most 200 characters")
+        if title is not None and len(title) > 300:
+            raise ValueError("problem title must contain at most 300 characters")
+        if len(tags) > 1_000:
+            raise ValueError("problem tags must contain at most 1000 characters")
+        parsed_date = dt.date.fromisoformat(attempted_on) if attempted_on else local_today()
+        if parsed_date > local_today():
+            raise ValueError("attempted_on cannot be in the future")
+
         def commit(session: Session):
-            problem = session.get(V2Problem, problem_slug)
+            problem = session.get(V2Problem, normalized)
+            if problem is None:
+                normalized_difficulty = str(difficulty or "").lower()
+                normalized_title = str(title or "").strip()
+                if not normalized_title or normalized_difficulty not in {"easy", "medium", "hard"}:
+                    raise ValueError(
+                        "a new problem requires title and easy, medium, or hard difficulty metadata"
+                    )
+                problem = V2Problem(
+                    slug=normalized,
+                    title=normalized_title,
+                    url=f"https://leetcode.com/problems/{normalized}/",
+                    difficulty=Difficulty(normalized_difficulty),
+                    tags=str(tags),
+                    eligible=False,
+                )
+                session.add(problem)
+                session.flush()
             domain = SyncCoachDomain(session)
             balance_before = domain.credit_balance(chat_id)
-            result = domain.commit_canonical_attempt(
+            result = domain.record_problem_attempt(
                 chat_id,
-                problem_slug,
+                normalized,
                 outcome,
                 feedback,
                 lesson_delta,
                 operation_key=operation_key,
+                attempted_on=parsed_date,
+                language=language,
+                solution_summary=solution_summary[:4000],
+                time_spent_min=time_spent_min,
             )
             replayed = isinstance(result, dict) and result.get("replayed") is True
             queued = getattr(result, "review_id", None) is not None
             recorded_outcome = outcome
             if replayed:
-                key = f"canonical_attempt:{chat_id}:{problem_slug}:{operation_key}"
+                key = f"canonical_attempt:{chat_id}:{normalized}:{operation_key}"
                 entry = session.exec(
                     select(V2CreditLedger).where(V2CreditLedger.idempotency_key == key)
                 ).one()
@@ -426,6 +611,102 @@ class SQLCoachDomainAdapter:
             }
 
         return await self._write(commit)
+
+    async def correct_attempt(
+        self,
+        *,
+        chat_id: int,
+        attempt_id: str,
+        outcome: str | None,
+        attempted_on: str | None,
+        feedback: str | None,
+        language: str | None,
+        clear_language: bool = False,
+        solution_summary: str | None,
+        time_spent_min: int | None,
+        clear_time_spent: bool = False,
+        reason: str,
+        operation_key: str,
+    ) -> JsonObject:
+        parsed = dt.date.fromisoformat(attempted_on) if attempted_on else None
+        if parsed is not None and parsed > local_today():
+            raise ValueError("attempted_on cannot be in the future")
+        return await self._write(
+            lambda session: SyncCoachDomain(session).correct_attempt(
+                chat_id,
+                int(attempt_id),
+                outcome=outcome,
+                attempted_on=parsed,
+                feedback=feedback[:4000] if feedback is not None else None,
+                language=language[:50] if language else None,
+                clear_language=clear_language,
+                solution_summary=solution_summary[:4000] if solution_summary is not None else None,
+                time_spent_min=time_spent_min,
+                clear_time_spent=clear_time_spent,
+                reason=reason[:1000],
+                operation_key=operation_key,
+            )
+        )
+
+    async def reverse_attempt(
+        self,
+        *,
+        chat_id: int,
+        attempt_id: str,
+        reason: str,
+        operation_key: str,
+    ) -> JsonObject:
+        return await self._write(
+            lambda session: SyncCoachDomain(session).reverse_attempt(
+                chat_id,
+                int(attempt_id),
+                reason=reason[:1000],
+                operation_key=operation_key,
+            )
+        )
+
+    async def schedule_follow_up(
+        self, *, chat_id: int, due_at: str, message: str, operation_key: str
+    ) -> JsonObject:
+        local_due = dt.datetime.fromisoformat(due_at)
+        utc_due = (
+            local_due.astimezone(dt.UTC)
+            if local_due.tzinfo
+            else local_wall_to_utc(local_due.isoformat())
+        )
+        if utc_due <= utcnow():
+            raise ValueError("follow-up must be scheduled in the future")
+        if not message.strip() or len(message) > 4000:
+            raise ValueError("follow-up message must contain 1 to 4000 characters")
+        return await self._write(
+            lambda session: SyncCoachDomain(session).schedule_follow_up(
+                chat_id, utc_due, message.strip(), operation_key
+            )
+        )
+
+    async def list_follow_ups(
+        self, *, chat_id: int, status: str = "scheduled", limit: int = 20
+    ) -> list[JsonObject]:
+        def query(session: Session):
+            statement = select(V2FollowUp).where(V2FollowUp.chat_id == chat_id)
+            if status != "all":
+                statement = statement.where(V2FollowUp.status == status)
+            return list(
+                session.exec(
+                    statement.order_by(V2FollowUp.due_at).limit(min(max(limit, 1), 50))
+                ).all()
+            )
+
+        return await self._read(query)
+
+    async def cancel_follow_up(
+        self, *, chat_id: int, follow_up_id: str, operation_key: str
+    ) -> JsonObject:
+        return await self._write(
+            lambda session: SyncCoachDomain(session).cancel_follow_up(
+                chat_id, follow_up_id, operation_key
+            )
+        )
 
     async def skip_problem(self, *, chat_id: int, review_id: str) -> JsonObject:
         return await self._write(
@@ -470,211 +751,6 @@ class SQLCoachDomainAdapter:
                 chat_id, lesson_delta, operation_key=operation_key
             )
         )
-
-
-class SQLRunStateRepository:
-    """Persists opaque Agents SDK RunState plus Telegram-safe approval aliases."""
-
-    def __init__(self, engine) -> None:
-        self.engine = engine
-
-    async def save(self, state: SerializedRunState) -> None:
-        def execute():
-            with Session(self.engine) as session:
-                old_runs = session.exec(
-                    select(V2AgentRun).where(
-                        V2AgentRun.chat_id == state.chat_id,
-                        V2AgentRun.status == AgentRunStatus.PAUSED,
-                    )
-                ).all()
-                for old in old_runs:
-                    old.status = AgentRunStatus.FAILED
-                    old.completed_at = utcnow()
-                    old_approvals = session.exec(
-                        select(V2PendingApproval).where(
-                            V2PendingApproval.agent_run_id == old.id,
-                            V2PendingApproval.status == ApprovalStatus.PENDING,
-                        )
-                    ).all()
-                    for approval in old_approvals:
-                        approval.status = ApprovalStatus.EXPIRED
-                        approval.resolved_at = utcnow()
-                row = V2AgentRun(
-                    id=state.run_id,
-                    chat_id=state.chat_id,
-                    status=AgentRunStatus.PAUSED,
-                    state_json=json.dumps(
-                        {
-                            "sdk_state": state.sdk_state,
-                            "created_at": state.created_at.isoformat(),
-                            "expires_at": state.expires_at.isoformat(),
-                        }
-                    ),
-                )
-                session.add(row)
-                for approval in state.approvals:
-                    alias = secrets.token_hex(8)
-                    session.add(
-                        V2PendingApproval(
-                            id=alias,
-                            chat_id=state.chat_id,
-                            agent_run_id=state.run_id,
-                            action=approval.tool_name,
-                            payload_json=json.dumps(
-                                {"call_id": approval.approval_id, "arguments": approval.arguments}
-                            ),
-                            summary=approval.summary,
-                            expires_at=state.expires_at,
-                        )
-                    )
-                session.commit()
-
-        await asyncio.to_thread(execute)
-
-    async def load(self, *, chat_id: int) -> SerializedRunState | None:
-        def execute():
-            with Session(self.engine) as session:
-                run = session.exec(
-                    select(V2AgentRun)
-                    .where(
-                        V2AgentRun.chat_id == chat_id,
-                        V2AgentRun.status == AgentRunStatus.PAUSED,
-                    )
-                    .order_by(V2AgentRun.updated_at.desc())
-                ).first()
-                if run is None:
-                    return None
-                envelope = json.loads(run.state_json)
-                rows = session.exec(
-                    select(V2PendingApproval).where(
-                        V2PendingApproval.agent_run_id == run.id,
-                        V2PendingApproval.status == ApprovalStatus.PENDING,
-                    )
-                ).all()
-                approvals = []
-                for row in rows:
-                    payload = json.loads(row.payload_json)
-                    approvals.append(
-                        PendingApproval(
-                            approval_id=str(payload["call_id"]),
-                            call_id=str(payload["call_id"]),
-                            tool_name=row.action,
-                            arguments=payload.get("arguments", {}),
-                            summary=row.summary,
-                        )
-                    )
-                return SerializedRunState(
-                    chat_id=chat_id,
-                    run_id=run.id,
-                    sdk_state=envelope["sdk_state"],
-                    approvals=approvals,
-                    created_at=dt.datetime.fromisoformat(envelope["created_at"]),
-                    expires_at=dt.datetime.fromisoformat(envelope["expires_at"]),
-                )
-
-        return await asyncio.to_thread(execute)
-
-    async def delete(self, *, chat_id: int, run_id: str) -> None:
-        def execute():
-            with Session(self.engine) as session:
-                run = session.get(V2AgentRun, run_id)
-                if run is not None and run.chat_id == chat_id:
-                    run.status = AgentRunStatus.COMPLETED
-                    run.completed_at = utcnow()
-                session.commit()
-
-        await asyncio.to_thread(execute)
-
-    async def abandon(self, *, chat_id: int) -> None:
-        """Expire paused runs when a newer user message supersedes them."""
-
-        def execute():
-            with Session(self.engine) as session:
-                runs = session.exec(
-                    select(V2AgentRun).where(
-                        V2AgentRun.chat_id == chat_id,
-                        V2AgentRun.status == AgentRunStatus.PAUSED,
-                    )
-                ).all()
-                run_ids = [run.id for run in runs]
-                for run in runs:
-                    run.status = AgentRunStatus.FAILED
-                    run.completed_at = utcnow()
-                if run_ids:
-                    approvals = session.exec(
-                        select(V2PendingApproval).where(
-                            V2PendingApproval.agent_run_id.in_(run_ids),
-                            V2PendingApproval.status == ApprovalStatus.PENDING,
-                        )
-                    ).all()
-                    for approval in approvals:
-                        approval.status = ApprovalStatus.EXPIRED
-                        approval.resolved_at = utcnow()
-                session.commit()
-
-        await asyncio.to_thread(execute)
-
-    async def pending_rows(self, chat_id: int) -> list[V2PendingApproval]:
-        def execute():
-            with Session(self.engine) as session:
-                return list(
-                    session.exec(
-                        select(V2PendingApproval).where(
-                            V2PendingApproval.chat_id == chat_id,
-                            V2PendingApproval.status == ApprovalStatus.PENDING,
-                            V2PendingApproval.expires_at > utcnow(),
-                        )
-                    ).all()
-                )
-
-        return await asyncio.to_thread(execute)
-
-    async def resolve_alias(self, chat_id: int, alias: str, approved: bool) -> str | None:
-        del approved
-
-        def execute():
-            with Session(self.engine) as session:
-                row = session.get(V2PendingApproval, alias)
-                expires_at = row.expires_at if row is not None else None
-                if expires_at is not None and expires_at.tzinfo is None:
-                    expires_at = expires_at.replace(tzinfo=dt.UTC)
-                if (
-                    row is None
-                    or row.chat_id != chat_id
-                    or row.status != ApprovalStatus.PENDING
-                    or expires_at is None
-                    or expires_at <= utcnow()
-                ):
-                    return None
-                call_id = str(json.loads(row.payload_json)["call_id"])
-                return call_id
-
-        return await asyncio.to_thread(execute)
-
-    async def finalize_alias(self, chat_id: int, alias: str, approved: bool) -> None:
-        def execute():
-            with Session(self.engine) as session:
-                row = session.get(V2PendingApproval, alias)
-                if (
-                    row is not None
-                    and row.chat_id == chat_id
-                    and row.status == ApprovalStatus.PENDING
-                ):
-                    row.status = ApprovalStatus.APPROVED if approved else ApprovalStatus.REJECTED
-                    row.resolved_at = utcnow()
-                    session.commit()
-
-        await asyncio.to_thread(execute)
-
-    async def set_approval_message(self, alias: str, message_id: int) -> None:
-        def execute():
-            with Session(self.engine) as session:
-                row = session.get(V2PendingApproval, alias)
-                if row is not None:
-                    row.approval_message_id = message_id
-                    session.commit()
-
-        await asyncio.to_thread(execute)
 
 
 class PostgresAgentSession:

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections import Counter
 from collections.abc import Mapping, Sequence
 
 from sqlmodel import Session, select
@@ -11,7 +10,6 @@ from leetcode_coach.domain.schemas import (
     HydratedCandidate,
     ProposalPreview,
     ProposalSelection,
-    normalise_mix,
 )
 
 
@@ -22,11 +20,7 @@ def hydrate_proposal(
     required_mix: Mapping[str, int] | None = None,
     expected_count: int | None = None,
 ) -> ProposalPreview:
-    """Validate model-selected slugs and hydrate every display field from DB.
-
-    This is the canonical trust boundary: titles, URLs, tags and difficulty
-    from a model are intentionally not accepted by this function.
-    """
+    """Validate selected identities and hydrate display fields from durable rows."""
 
     if expected_count is not None and len(selections) != expected_count:
         raise DomainError(f"proposal must contain exactly {expected_count} selections")
@@ -41,16 +35,9 @@ def hydrate_proposal(
     unknown = [slug for slug in slugs if slug not in by_slug]
     if unknown:
         raise DomainError(f"unknown canonical problem slug: {unknown[0]}")
-    ineligible = [slug for slug in slugs if by_slug[slug].solved or not by_slug[slug].eligible]
-    if ineligible:
-        raise DomainError(f"ineligible problem slug: {ineligible[0]}")
-
-    actual_mix = Counter(
-        getattr(by_slug[slug].difficulty, "value", by_slug[slug].difficulty) for slug in slugs
-    )
-    mix = normalise_mix(required_mix)
-    if mix is not None and dict(actual_mix) != {key: value for key, value in mix.items() if value}:
-        raise DomainError(f"wrong proposal difficulty mix: got {dict(actual_mix)}, expected {mix}")
+    # Solved state, pool eligibility, count, and difficulty mix are coaching
+    # decisions. This boundary retains only identity and rendering invariants.
+    del required_mix
 
     return ProposalPreview(
         tuple(

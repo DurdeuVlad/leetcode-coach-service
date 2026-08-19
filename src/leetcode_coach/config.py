@@ -31,8 +31,7 @@ class V2Settings(BaseSettings):
     openai_api_key: str = Field(...)
     terra_model: str = "gpt-5.6-terra"
     sol_advisor_model: str = "gpt-5.6-sol"
-    agent_max_turns: int = Field(8, ge=1, le=8)
-    approval_ttl_hours: int = Field(24, ge=1, le=168)
+    agent_max_turns: int = Field(16, ge=1, le=32)
     prompt_cache_ttl: str = "30m"
 
     timezone: str = "Europe/Bucharest"

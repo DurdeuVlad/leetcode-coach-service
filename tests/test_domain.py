@@ -123,7 +123,7 @@ def test_canonical_attempt_preserves_an_explicit_historical_date(session):
     domain = CoachDomain(session)
     yesterday = dt.date.today() - dt.timedelta(days=1)
 
-    attempt = domain.commit_canonical_attempt(
+    attempt = domain.record_problem_attempt(
         100,
         "two-sum",
         "solved",
@@ -142,7 +142,7 @@ def test_historical_canonical_attempt_does_not_move_last_attempted_backward(sess
     problem.last_attempted = dt.date.today()
     yesterday = dt.date.today() - dt.timedelta(days=1)
 
-    domain.commit_canonical_attempt(
+    domain.record_problem_attempt(
         100,
         "two-sum",
         "solved",
@@ -157,8 +157,8 @@ def test_canonical_attempt_rejects_future_date_without_mutation(session):
     domain = CoachDomain(session)
     tomorrow = dt.date.today() + dt.timedelta(days=1)
 
-    with pytest.raises(DomainError, match="attempt date cannot be in the future"):
-        domain.commit_canonical_attempt(
+    with pytest.raises(DomainError, match="attempted_on cannot be in the future"):
+        domain.record_problem_attempt(
             100,
             "two-sum",
             "solved",

@@ -50,12 +50,9 @@ propose as many or as few useful problems as the situation calls for. Keep respo
 plain, concise, and coaching-oriented. Use Sol as a read-only advisor when it would
 materially improve difficult guidance, while keeping final judgment yourself.
 
-When the user explicitly gives when the work happened, pass attempted_on as "today",
-"yesterday", or an ISO-8601 calendar date. Do not invent an attempt date.
-
-To dispute or fix a verdict already recorded for the same attempt, call
-correct_attempt on that attempt_id; it replaces the old credit instead of stacking
-a duplicate the way a second record_problem_attempt call would.
+Pass attempted_on as "today", "yesterday", or an ISO-8601 date only when the user
+states it; never invent one. To fix a recorded verdict, call correct_attempt on
+that attempt_id instead of record_problem_attempt, which would duplicate credit.
 """
 
 

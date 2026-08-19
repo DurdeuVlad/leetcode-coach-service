@@ -1,0 +1,101 @@
+name: Publish as open source
+run-name: "Publish OSS check — risk: low, effort: ~2-3h — triggered by ${{ github.actor }}"
+
+# Manual-only. This flips the repo public and locks down branch protection
+# on master — a one-way action. Requires typing "PUBLISH" in the dispatch
+# input as a deliberate confirmation, not just a tap. Only collaborators
+# with write access can even see/trigger this in the Actions UI.
+#
+# The `confirm` input description below is the risk/research summary as it
+# appears on the "Run workflow" form — read it there before typing anything.
+# Full research: https://github.com/DurdeuVlad/oss-tracker/blob/candidate/leetcode-coach-service/candidates/leetcode-coach-service.md
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: >-
+          RISK: low overall (legal/IP: low — MIT LICENSE already present,
+          correct attribution. secrets/security: low — no hardcoded creds
+          found across full 49-commit history; deploy.yml only reachable
+          via push-to-master, never pull_request, and uses only
+          ${{ secrets.* }} refs, no baked-in hostnames/tokens. reputational:
+          low — finished code, personal project, not client work).
+          EFFORT: ~2-3h estimated, high confidence (repo already has
+          LICENSE/CI/CONTRIBUTING/CoC/SECURITY — this was verification, not
+          new work). BLOCKING ITEMS at last check: confirm deploy.yml has no
+          baked-in secrets (done — clean), check pyproject.toml/uv.lock for
+          GPL/AGPL conflicts, confirm docs/ don't leak anything private.
+          Full report: oss-tracker/candidates/leetcode-coach-service.md
+          (branch candidate/leetcode-coach-service). Type PUBLISH (all
+          caps) to confirm you've read this and want to make the repo
+          public now.
+        required: true
+        type: string
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Record full research/risk context in the run summary
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'SUMMARY'
+          ## Publish decision record
+
+          **Repo**: leetcode-coach-service
+          **Triggered by**: ${{ github.actor }}
+          **Confirmation text entered**: `${{ inputs.confirm }}`
+
+          ### Risk assessment
+          - Legal/IP: low — MIT `LICENSE` present, correctly attributed, no vendored third-party code found.
+          - Secrets/security: low — full 49-commit history checked, no hardcoded credentials. `deploy.yml` only triggers on `push: [master]` (never `pull_request`), references only `${{ secrets.* }}`, no baked-in hostnames or tokens.
+          - Reputational: low — finished, working code; personal project, not client work.
+          - **Overall: low**
+
+          ### Work assessment
+          - Estimated effort: ~2-3h
+          - Confidence: high (repo already had LICENSE/CI/CONTRIBUTING/CoC/SECURITY before this process started — this was a verification pass, not new hygiene work)
+          - Blocking items at proposal time: confirm deploy.yml has no baked-in secrets (verified clean), check pyproject.toml/uv.lock for GPL/AGPL conflicts, confirm docs/ don't reference anything private
+
+          ### Full research
+          https://github.com/DurdeuVlad/oss-tracker/blob/candidate/leetcode-coach-service/candidates/leetcode-coach-service.md
+
+          ### Actions this run will take if confirmed
+          1. Enable branch protection on `master` (require PR, block force-push)
+          2. Lock default Actions workflow permissions to read-only
+          3. Flip repository visibility to public
+          SUMMARY
+
+      - name: Require explicit confirmation
+        if: ${{ inputs.confirm != 'PUBLISH' }}
+        run: |
+          echo "::error::Confirmation text did not match 'PUBLISH' exactly. Nothing was changed. Re-run and type PUBLISH if you meant to do this, after reading the risk summary in the run-workflow form (and above, in this run's summary)."
+          exit 1
+
+      - name: Protect master branch
+        env:
+          GH_TOKEN: ${{ secrets.OSS_ADMIN_TOKEN }}
+        run: |
+          gh api -X PUT repos/${{ github.repository }}/branches/master/protection \
+            -f required_pull_request_reviews.required_approving_review_count=0 \
+            -F enforce_admins=true \
+            -F required_status_checks=null \
+            -F restrictions=null
+
+      - name: Lock default workflow permissions to read-only
+        env:
+          GH_TOKEN: ${{ secrets.OSS_ADMIN_TOKEN }}
+        run: |
+          gh api -X PATCH repos/${{ github.repository }}/actions/permissions/workflow \
+            -f default_workflow_permissions=read
+
+      - name: Make repository public
+        env:
+          GH_TOKEN: ${{ secrets.OSS_ADMIN_TOKEN }}
+        run: |
+          gh api -X PATCH repos/${{ github.repository }} -F private=false
+
+      - name: Confirm result
+        env:
+          GH_TOKEN: ${{ secrets.OSS_ADMIN_TOKEN }}
+        run: |
+          gh api repos/${{ github.repository }} --jq '"Repo is now: " + (if .private then "PRIVATE (something went wrong)" else "PUBLIC" end)' | tee -a "$GITHUB_STEP_SUMMARY"

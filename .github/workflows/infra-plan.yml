@@ -1,0 +1,38 @@
+name: Terraform architecture checks
+
+on:
+  pull_request:
+    paths:
+      - "infra/terraform/**"
+      - ".github/workflows/infra-plan.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra/terraform
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+
+      - name: Format check
+        run: terraform fmt -check -diff
+
+      - name: Initialize without a backend
+        run: terraform init -backend=false -input=false
+
+      - name: Validate configuration
+        run: terraform validate
+
+      - name: Zero-resource plan
+        run: terraform plan -input=false -var='enable_resources=false'
+
+# A future apply workflow must be manual, environment-protected, and use
+# GitHub OIDC with a narrowly scoped role. This workflow intentionally has
+# no id-token permission and never provisions cloud resources.

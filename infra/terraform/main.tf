@@ -67,11 +67,13 @@ resource "aws_db_instance" "postgres" {
   instance_class              = "db.t4g.micro"
   allocated_storage           = 20
   storage_encrypted           = true
+  deletion_protection         = true
   db_name                     = "leetcode_coach"
   username                    = var.database_master_username
   manage_master_user_password = true
   db_subnet_group_name        = aws_db_subnet_group.this[0].name
   vpc_security_group_ids      = [aws_security_group.database[0].id]
   publicly_accessible         = false
-  skip_final_snapshot         = true
+  skip_final_snapshot         = false
+  final_snapshot_identifier   = "${local.name}-final"
 }

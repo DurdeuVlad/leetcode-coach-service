@@ -30,9 +30,8 @@ jobs:
       - name: Validate configuration
         run: terraform validate
 
-      - name: Zero-resource plan
-        run: terraform plan -input=false -var='enable_resources=false'
-
-# A future apply workflow must be manual, environment-protected, and use
+# A plan can be run by an operator with explicitly configured credentials using
+# the command in infra/terraform/README.md. A future apply workflow must be
+# manual, environment-protected, and use
 # GitHub OIDC with a narrowly scoped role. This workflow intentionally has
-# no id-token permission and never provisions cloud resources.
+# no id-token permission and never contacts AWS or provisions cloud resources.

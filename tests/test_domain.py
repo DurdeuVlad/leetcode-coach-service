@@ -4,6 +4,7 @@ from decimal import Decimal
 import pytest
 from sqlmodel import Session, create_engine, select
 
+from leetcode_coach.clock import local_today
 from leetcode_coach.db.models import (
     BaseSQLModel,
     Difficulty,
@@ -121,7 +122,7 @@ def test_canonical_attempt_without_review_rewards_real_work(session):
 
 def test_canonical_attempt_preserves_an_explicit_historical_date(session):
     domain = CoachDomain(session)
-    yesterday = dt.date.today() - dt.timedelta(days=1)
+    yesterday = local_today() - dt.timedelta(days=1)
 
     attempt = domain.record_problem_attempt(
         100,
@@ -139,8 +140,8 @@ def test_canonical_attempt_preserves_an_explicit_historical_date(session):
 def test_historical_canonical_attempt_does_not_move_last_attempted_backward(session):
     domain = CoachDomain(session)
     problem = session.get(V2Problem, "two-sum")
-    problem.last_attempted = dt.date.today()
-    yesterday = dt.date.today() - dt.timedelta(days=1)
+    problem.last_attempted = local_today()
+    yesterday = local_today() - dt.timedelta(days=1)
 
     domain.record_problem_attempt(
         100,
@@ -150,12 +151,12 @@ def test_historical_canonical_attempt_does_not_move_last_attempted_backward(sess
         attempted_on=yesterday,
     )
 
-    assert problem.last_attempted == dt.date.today()
+    assert problem.last_attempted == local_today()
 
 
 def test_canonical_attempt_rejects_future_date_without_mutation(session):
     domain = CoachDomain(session)
-    tomorrow = dt.date.today() + dt.timedelta(days=1)
+    tomorrow = local_today() + dt.timedelta(days=1)
 
     with pytest.raises(DomainError, match="attempted_on cannot be in the future"):
         domain.record_problem_attempt(
@@ -411,8 +412,8 @@ def test_review_lifecycle_skip_solution_reattempt_extend_and_tax(session):
     )
     batch.status = ProposalStatus.EXPIRED
     extended = domain.extend_proposal(100, batch.id)
-    domain.apply_daily_tax(100, dt.date.today())
-    domain.apply_daily_tax(100, dt.date.today())
+    domain.apply_daily_tax(100, local_today())
+    domain.apply_daily_tax(100, local_today())
 
     assert skipped.status.value == "skipped"
     assert viewed.status.value == "saw_solution"

@@ -10,6 +10,7 @@ from sqlmodel import Session, create_engine, select
 
 from leetcode_coach.agent.orchestrator import AgentRunOutcome, AgentSettings
 from leetcode_coach.application import CoachApplication
+from leetcode_coach.clock import local_today
 from leetcode_coach.db.base import BaseSQLModel
 from leetcode_coach.db.models import (
     Difficulty,
@@ -56,7 +57,7 @@ async def test_empty_registry_records_two_yesterday_solves_and_proposes_one_hard
     v2_engine, monkeypatch
 ):
     adapter = SQLCoachDomainAdapter(v2_engine)
-    yesterday = dt.date.today() - dt.timedelta(days=1)
+    yesterday = local_today() - dt.timedelta(days=1)
     lookup_calls = []
 
     async def unavailable_lookup(value):
@@ -115,7 +116,7 @@ async def test_empty_registry_records_two_yesterday_solves_and_proposes_one_hard
 
 @pytest.mark.asyncio
 async def test_record_problem_attempt_rejects_future_date_without_mutation(v2_engine):
-    future = dt.date.today() + dt.timedelta(days=1)
+    future = local_today() + dt.timedelta(days=1)
 
     with pytest.raises(Exception, match="future"):
         await SQLCoachDomainAdapter(v2_engine).record_problem_attempt(
@@ -163,11 +164,11 @@ async def test_backdated_record_preserves_existing_problem_state_and_latest_atte
         problem.solved = True
         problem.eligible = True
         problem.times_attempted = 4
-        problem.last_attempted = dt.date.today()
+        problem.last_attempted = local_today()
         session.add(problem)
         session.commit()
 
-    yesterday = dt.date.today() - dt.timedelta(days=1)
+    yesterday = local_today() - dt.timedelta(days=1)
     result = await SQLCoachDomainAdapter(v2_engine).record_problem_attempt(
         chat_id=1,
         problem_slug="https://leetcode.com/problems/coin-change/description/",
@@ -192,7 +193,7 @@ async def test_backdated_record_preserves_existing_problem_state_and_latest_atte
         assert problem.solved is True
         assert problem.eligible is True
         assert problem.times_attempted == 5
-        assert problem.last_attempted == dt.date.today()
+        assert problem.last_attempted == local_today()
 
 
 @pytest.mark.asyncio
@@ -392,7 +393,7 @@ async def test_empty_queue_canonical_attempt_adapter_replay_is_a_no_op(v2_engine
 
 
 def test_direct_canonical_attempt_date_parser_accepts_yesterday_and_rejects_invalid_dates():
-    yesterday = dt.date.today() - dt.timedelta(days=1)
+    yesterday = local_today() - dt.timedelta(days=1)
 
     assert _parse_attempted_on("yesterday") == yesterday
     assert _parse_attempted_on(yesterday.isoformat()) == yesterday
